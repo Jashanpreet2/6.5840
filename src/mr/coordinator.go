@@ -45,8 +45,17 @@ type Coordinator struct {
 func (c *Coordinator) CompleteMapTask(task MapTask) {
 }
 
-func (c *Coordinator) CompleteReduceTask(task MapTask) {
+func (c *Coordinator) CompleteReduceTask(taskId uint, outputFile string) error {
+	defer c.l.Unlock()
 	c.l.Lock()
+	if c.reduceTasks[taskId].status == InProgress {
+		c.reduceTasks[taskId].status = Completed
+		c.completedReduces += 1
+	} else {
+		fmt.Errorf("Got completed message for reduce task (id: %d) not in progress", taskId)
+	}
+	return
+}
 }
 
 // an example RPC handler.
