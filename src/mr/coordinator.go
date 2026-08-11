@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -19,26 +20,30 @@ const (
 )
 
 type MapTask struct {
-	id     int
 	status TaskStatus
 	input  string
-	output string
 }
 
 type ReduceTask struct {
-	id         int
-	status     TaskStatus
-	inputFiles []string
-	output     string
+	status           TaskStatus
+	partitionsToRead []string
 }
 
 type Coordinator struct {
 	// Your definitions here.
-	l           sync.Mutex
-	mapTasks    []MapTask
-	reduceTasks []ReduceTask
-	nReduce     int
-	done        bool
+	l                sync.Mutex
+	mapTasks         map[uint]MapTask
+	reduceTasks      map[uint]ReduceTask
+	nReduce          uint
+	completedReduces uint
+}
+
+type GetTaskArgs struct {
+	workerId string
+}
+
+type GetTaskReply[T MapTask | ReduceTask] struct {
+	task T
 }
 
 // Your code here -- RPC handlers for the worker to call.
