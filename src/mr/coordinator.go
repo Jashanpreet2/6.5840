@@ -56,6 +56,12 @@ func (c *Coordinator) CompleteReduceTask(taskId uint, outputFile string) error {
 	}
 	return
 }
+
+func (c *Coordinator) GetReducePartitions(taskId uint, partitions *[]string) error {
+	defer c.l.Unlock()
+	c.l.Lock()
+	*files = append(*files, c.reduceTasks[taskId].partitionsToRead)
+	return nil
 }
 
 // an example RPC handler.
