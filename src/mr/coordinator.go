@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"slices"
 	"sync"
 )
 
@@ -19,12 +20,21 @@ const (
 	Completed
 )
 
+type TaskType int
+
+const (
+	MapType TaskType = iota
+	ReduceType
+)
+
 type MapTask struct {
+	worker int
 	status TaskStatus
 	input  string
 }
 
 type ReduceTask struct {
+	worker           int
 	status           TaskStatus
 	partitionsToRead []string
 }
@@ -32,10 +42,10 @@ type ReduceTask struct {
 type Coordinator struct {
 	// Your definitions here.
 	l                sync.Mutex
-	mapTasks         map[uint]MapTask
-	reduceTasks      map[uint]ReduceTask
-	nReduce          uint
-	completedReduces uint
+	mapTasks         map[int]*MapTask
+	reduceTasks      map[int]*ReduceTask
+	nReduce          int
+	completedReduces int
 }
 
 type GetTaskArgs struct {
@@ -124,10 +134,25 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		l:                sync.Mutex{},
-		mapTasks:         make(map[int]MapTask, len(files)),
-		reduceTasks:      make(map[int]ReduceTask, nReduce),
+		mapTasks:         make(map[int]*MapTask, len(files)),
+		reduceTasks:      make(map[int]*ReduceTask, nReduce),
 		nReduce:          nReduce,
 		completedReduces: 0,
+	}
+
+	for i := range files {
+		c.mapTasks[i] = &MapTask{
+			worker: -1,
+			status: Idle,
+			input:  files[i],
+		}
+	}
+
+	for i := range nReduce {
+		c.reduceTasks[i] = &ReduceTask{
+			status:           Unavailable,
+			partitionsToRead: []string{},
+		}
 	}
 
 	c.server(sockname)
