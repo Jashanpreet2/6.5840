@@ -74,10 +74,7 @@ func (c *Coordinator) server(sockname string) {
 func (c *Coordinator) Done() bool {
 	defer c.l.Unlock()
 	c.l.Lock()
-
-	// c.done stores whether the task is done. It is set to true when all of
-	// the reduce tasks are done. The logic is handled in CompleteReduceTask
-	return c.done
+	return c.completedReduces == c.nReduces
 }
 
 // create a Coordinator.
