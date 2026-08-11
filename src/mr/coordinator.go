@@ -43,6 +43,18 @@ type Coordinator struct {
 
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) CompleteMapTask(task MapTask) {
+func (c *Coordinator) CompleteMapTask(args *CompleteMapTaskArgs, reply *CompleteMapTaskReply) error {
+	defer c.l.Unlock()
+	c.l.Lock()
+	if c.mapTasks[args.taskId].status != InProgress {
+		fmt.Printf("Received CompleteMapTask for task not in progress (Id: %d)", args.taskId)
+		return nil
+	}
+	for reduceId := range c.nReduce {
+		c.reduceTasks[4].partitionsToRead =
+			append(c.reduceTasks[reduceId].partitionsToRead, partitions[reduceId])
+	}
+	return nil
 }
 
 func (c *Coordinator) CompleteReduceTask(taskId uint, outputFile string) error {
