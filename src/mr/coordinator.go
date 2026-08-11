@@ -84,9 +84,13 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
-
-	// Your code here.
+	c := Coordinator{
+		l:                sync.Mutex{},
+		mapTasks:         make(map[int]MapTask, len(files)),
+		reduceTasks:      make(map[int]ReduceTask, nReduce),
+		nReduce:          nReduce,
+		completedReduces: 0,
+	}
 
 	c.server(sockname)
 	return &c
