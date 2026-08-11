@@ -12,7 +12,8 @@ import (
 type TaskStatus int
 
 const (
-	Idle TaskStatus = iota
+	Unavailable TaskStatus = iota
+	Idle
 	InProgress
 	Completed
 )
