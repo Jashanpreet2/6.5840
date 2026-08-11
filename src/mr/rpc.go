@@ -21,3 +21,9 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type CompleteMapTaskArgs struct {
+	taskId     uint
+	partitions map[uint]string
+}
+
+type CompleteMapTaskReply struct{}
