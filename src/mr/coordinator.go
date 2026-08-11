@@ -52,16 +52,17 @@ type GetTaskArgs struct {
 	workerId string
 }
 
-type GetTaskReply[T MapTask | ReduceTask] struct {
-	task T
+type GetTaskReply struct {
+	taskType TaskType
+	input    string
 }
 
 // Your code here -- RPC handlers for the worker to call.
-func (c *Coordinator) GetTask() error {
+func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	defer c.l.Unlock()
 	for _, task := range c.mapTasks {
 		if task.status == Idle {
-
+			GetTaskReply.taskType = MapType
 		}
 	}
 	return nil
@@ -75,28 +76,36 @@ func (c *Coordinator) CompleteMapTask(args *CompleteMapTaskArgs, reply *Complete
 		return nil
 	}
 	for reduceId := range c.nReduce {
-		c.reduceTasks[4].partitionsToRead =
-			append(c.reduceTasks[reduceId].partitionsToRead, partitions[reduceId])
+		c.reduceTasks[reduceId].partitionsToRead =
+			append(c.reduceTasks[reduceId].partitionsToRead, args.partitions[reduceId])
 	}
 	return nil
 }
 
-func (c *Coordinator) CompleteReduceTask(taskId uint, outputFile string) error {
+func (c *Coordinator) CompleteReduceTask(args *CompleteReduceTaskArgs, reply *CompleteReduceTaskReply) error {
 	defer c.l.Unlock()
 	c.l.Lock()
-	if c.reduceTasks[taskId].status == InProgress {
-		c.reduceTasks[taskId].status = Completed
+	if c.reduceTasks[args.taskId].status == InProgress {
+		c.reduceTasks[args.taskId].status = Completed
 		c.completedReduces += 1
 	} else {
-		fmt.Errorf("Got completed message for reduce task (id: %d) not in progress", taskId)
+		fmt.Printf("Got completed message for reduce task (id: %d) not in progress\n", args.taskId)
 	}
-	return
+	return nil
 }
 
-func (c *Coordinator) GetReducePartitions(taskId uint, partitions *[]string) error {
+func (c *Coordinator) GetReducePartitions(args *GetReducePartitionsArgs, reply *GetReducePartitionsReply) error {
 	defer c.l.Unlock()
 	c.l.Lock()
-	*files = append(*files, c.reduceTasks[taskId].partitionsToRead)
+	// Add guard against requesting for tasks which are complete or not started or never to be started
+	if task, ok := c.reduceTasks[args.taskId]; !ok {
+		fmt.Printf("ERROR: GetReducePartitions on a task that doesn't exist (ID: %d)\n", args.taskId)
+	} else if task.status != InProgress {
+		fmt.Printf("ERROR: GetReducePartitions on a task that is not in Progress (ID: %d, Status: %d)\n",
+			args.taskId, c.reduceTasks[args.taskId].status)
+	} else {
+		reply.partitions = slices.Clone(task.partitionsToRead)
+	}
 	return nil
 }
 
@@ -125,7 +134,7 @@ func (c *Coordinator) server(sockname string) {
 func (c *Coordinator) Done() bool {
 	defer c.l.Unlock()
 	c.l.Lock()
-	return c.completedReduces == c.nReduces
+	return c.completedReduces == c.nReduce
 }
 
 // create a Coordinator.
