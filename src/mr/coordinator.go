@@ -42,7 +42,16 @@ type Coordinator struct {
 }
 
 // Your code here -- RPC handlers for the worker to call.
-func (c *Coordinator) CompleteMapTask(task MapTask) {
+func (c *Coordinator) GetTask() error {
+	defer c.l.Unlock()
+	for _, task := range c.mapTasks {
+		if task.status == Idle {
+
+		}
+	}
+	return nil
+}
+
 func (c *Coordinator) CompleteMapTask(args *CompleteMapTaskArgs, reply *CompleteMapTaskReply) error {
 	defer c.l.Unlock()
 	c.l.Lock()
