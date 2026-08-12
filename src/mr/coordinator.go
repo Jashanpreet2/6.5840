@@ -38,9 +38,10 @@ type MapTask struct {
 
 // Reduce Task
 type ReduceTask struct {
-	worker           int
-	status           TaskStatus
-	partitionsToRead []string
+	worker               int
+	partitionsToRead     map[string]interface{}
+	inProgressPartitions map[string]interface{}
+	completePartitions   map[string]interface{}
 }
 
 // Coordinator
