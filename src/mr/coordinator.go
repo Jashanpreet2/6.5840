@@ -32,7 +32,6 @@ const (
 // Map Task
 type MapTask struct {
 	worker int
-	status TaskStatus
 	input  string
 }
 
