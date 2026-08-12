@@ -11,6 +11,7 @@ import (
 	"sync"
 )
 
+// Status of tasks
 type TaskStatus int
 
 const (
@@ -20,6 +21,7 @@ const (
 	Completed
 )
 
+// Type of task
 type TaskType int
 
 const (
@@ -27,18 +29,21 @@ const (
 	ReduceType
 )
 
+// Map Task
 type MapTask struct {
 	worker int
 	status TaskStatus
 	input  string
 }
 
+// Reduce Task
 type ReduceTask struct {
 	worker           int
 	status           TaskStatus
 	partitionsToRead []string
 }
 
+// Coordinator
 type Coordinator struct {
 	// Your definitions here.
 	l                sync.Mutex
