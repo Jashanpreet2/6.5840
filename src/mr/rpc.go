@@ -23,25 +23,36 @@ type ExampleReply struct {
 
 // CompleteMapTask
 type CompleteMapTaskArgs struct {
-	taskId     int
-	partitions map[int]string
+	TaskId     int
+	Partitions map[int]string
 }
 
 type CompleteMapTaskReply struct{}
 
 // CompleteReduceTask
 type CompleteReduceTaskArgs struct {
-	taskId     int
-	outputFile string
+	TaskId     int
+	OutputFile string
 }
 
 type CompleteReduceTaskReply struct{}
 
 // GetReducePartitions
 type GetReducePartitionsArgs struct {
-	taskId int
+	TaskId int
 }
 
 type GetReducePartitionsReply struct {
-	partitions []string
+	Partitions []string
+}
+
+// GetTask
+type GetTaskArgs struct {
+	WorkerId int
+}
+
+type GetTaskReply struct {
+	TaskId   int
+	TaskType TaskType
+	Input    string
 }
