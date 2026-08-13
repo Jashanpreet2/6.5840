@@ -48,11 +48,12 @@ type GetReducePartitionsReply struct {
 
 // GetTask
 type GetTaskArgs struct {
-	WorkerId int
 }
 
 type GetTaskReply struct {
 	TaskId   int
 	TaskType TaskType
 	Input    string
+	NReduce  int
+	NMap     int
 }
