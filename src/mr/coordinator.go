@@ -8,7 +8,9 @@ import (
 	"net/rpc"
 	"os"
 	"slices"
+	"sort"
 	"sync"
+	"time"
 )
 
 // Status of tasks
@@ -27,6 +29,8 @@ type TaskType int
 const (
 	MapType TaskType = iota
 	ReduceType
+	WaitType
+	ExitType
 )
 
 // Map Task
@@ -37,10 +41,7 @@ type MapTask struct {
 
 // Reduce Task
 type ReduceTask struct {
-	worker               int
-	partitionsToRead     []string
-	inProgressPartitions []string
-	completePartitions   []string
+	partitions []string
 }
 
 // Coordinator
@@ -67,14 +68,13 @@ type Coordinator struct {
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	defer c.l.Unlock()
 	c.l.Lock()
+	reply.NMap = c.nMap
+	reply.NReduce = c.nReduce
 	for taskId, task := range c.idleMaps {
 		// Reply
 		reply.TaskId = taskId
 		reply.TaskType = MapType
 		reply.Input = task.input
-
-		// Assign worker
-		task.worker = args.WorkerId
 
 		// Move to in progress
 		c.inProgressMaps[taskId] = task
@@ -86,42 +86,62 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	for taskId, task := range c.idleReduces {
 		reply.TaskId = taskId
 		reply.TaskType = ReduceType
-		for _, partition := range task.partitionsToRead {
+		for _, partition := range task.partitions {
 			reply.Input = partition
 			break
 		}
+		c.inProgressReduces[taskId] = task
+		delete(c.idleReduces, taskId)
+		return nil
+	}
+
+	// Return Exit if all tasks complete
+	if len(c.completeReduces) == c.nReduce {
+		reply.TaskType = ExitType
+		reply.TaskId = -1
+		reply.Input = ""
 
 		return nil
 	}
 
-	return fmt.Errorf("No task present")
+	// No task available but overall job still in progress, tell worker to stay on standby
+	reply.TaskType = WaitType
+	reply.TaskId = -1
+	reply.Input = ""
+	return nil
 }
 
 func (c *Coordinator) CompleteMapTask(args *CompleteMapTaskArgs, reply *CompleteMapTaskReply) error {
 	defer c.l.Unlock()
 	c.l.Lock()
-
-	// Check if not present
-	if _, ok := c.inProgressMaps[args.TaskId]; !ok {
-		fmt.Printf("Received CompleteMapTask for task not in progress (Id: %d)", args.TaskId)
-		return nil
+	fmt.Println("Completing map task")
+	// Move all reduces from unavailable if there are any
+	if len(c.unavailableReduces) > 0 {
+		c.idleReduces = c.unavailableReduces
+		c.unavailableReduces = map[int]*ReduceTask{}
 	}
 
+	// Assert that map is in progress
+	if _, ok := c.inProgressMaps[args.TaskId]; !ok {
+		fmt.Printf("Received CompleteMapTask for task not in progress (Id: %d)", args.TaskId)
+		return fmt.Errorf("Map task is already complete")
+	}
+
+	c.completeMaps[args.TaskId] = c.inProgressMaps[args.TaskId]
+	delete(c.inProgressMaps, args.TaskId)
+
+	// Store partitions
 	for taskId, task := range c.unavailableReduces {
-		task.partitionsToRead = append(task.partitionsToRead, args.Partitions[taskId])
+		task.partitions = append(task.partitions, args.Partitions[taskId])
 		c.idleReduces[taskId] = task
 		delete(c.unavailableReduces, taskId)
 	}
 
 	// Assign partition to relevant tasks
-	// for m := range []map[int]*ReduceTask{c.idleReduces, c.inProgressReduces} {
-	// 	for task, taskId := range m {
-
-	// 	}
-	// }
-	for reduceId := range c.nReduce {
-		c.unavailableReduces[reduceId].partitionsToRead =
-			append(c.unavailableReduces[reduceId].partitionsToRead, args.Partitions[reduceId])
+	for _, m := range []map[int]*ReduceTask{c.idleReduces, c.inProgressReduces} {
+		for taskId, task := range m {
+			task.partitions = append(task.partitions, args.Partitions[taskId])
+		}
 	}
 
 	return nil
@@ -130,11 +150,8 @@ func (c *Coordinator) CompleteMapTask(args *CompleteMapTaskArgs, reply *Complete
 func (c *Coordinator) CompleteReduceTask(args *CompleteReduceTaskArgs, reply *CompleteReduceTaskReply) error {
 	defer c.l.Unlock()
 	c.l.Lock()
+	showState(c)
 	if task, ok := c.inProgressReduces[args.TaskId]; ok {
-		// Set all partitions as complete
-		task.completePartitions = task.inProgressPartitions
-		task.inProgressPartitions = []string{}
-
 		// Move from inProgressReduces to completeReduces
 		c.completeReduces[args.TaskId] = task
 		delete(c.inProgressReduces, args.TaskId)
@@ -148,13 +165,12 @@ func (c *Coordinator) GetReducePartitions(args *GetReducePartitionsArgs, reply *
 	defer c.l.Unlock()
 	c.l.Lock()
 	// Add guard against requesting for tasks which are complete or not started or never to be started
-	if task, ok := c.inProgressReduces[args.TaskId]; !ok {
-		panic(fmt.Sprintf("ERROR: GetReducePartitions on a task that is not in progress (ID: %d)\n", args.TaskId))
+	if task, ok := c.inProgressReduces[args.TaskId]; ok {
+		reply.Partitions = slices.Clone(task.partitions)
+		return nil
 	} else {
-		reply.Partitions = slices.Clone(task.partitionsToRead)
-		task.inProgressPartitions = append(task.inProgressPartitions, task.partitionsToRead...)
+		return fmt.Errorf("This reduce task is not in progress")
 	}
-	return nil
 }
 
 // an example RPC handler.
@@ -185,6 +201,22 @@ func (c *Coordinator) Done() bool {
 	return len(c.completeReduces) == c.nReduce
 }
 
+func keys(m map[int]*ReduceTask) []int {
+	ks := make([]int, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Ints(ks)
+	return ks
+}
+func showState(c *Coordinator) {
+	fmt.Printf("reduce keys: unavailable=%v idle=%v in-progress=%v complete=%v\n",
+		keys(c.unavailableReduces), keys(c.idleReduces), keys(c.inProgressReduces), keys(c.completeReduces))
+	fmt.Printf("maps (%d total):\n  idle: %d\n  in-progress: %d\n  complete: %d\nreduces (%d total):\n  unavailable: %d\n  idle: %d\n  in-progress: %d\n  complete: %d\n",
+		c.nMap, len(c.idleMaps), len(c.inProgressMaps), len(c.completeMaps),
+		c.nReduce, len(c.unavailableReduces), len(c.idleReduces), len(c.inProgressReduces), len(c.completeReduces))
+}
+
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
@@ -213,13 +245,20 @@ func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator 
 
 	for i := range nReduce {
 		c.unavailableReduces[i] = &ReduceTask{
-			worker:               -1,
-			partitionsToRead:     []string{},
-			inProgressPartitions: []string{},
-			completePartitions:   []string{},
+			partitions: []string{},
 		}
 	}
 
+	monitor := func() {
+		defer c.l.Unlock()
+		for {
+			time.Sleep(6 * time.Second)
+			c.l.Lock()
+			showState(&c)
+			c.l.Unlock()
+		}
+	}
+	go monitor()
 	c.server(sockname)
 	return &c
 }
