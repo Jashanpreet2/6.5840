@@ -1,3 +1,6 @@
 pkg/
 *-handin.tar.gz
 src/main/mr-out-*
+src/mr/tmp
+src/mr/mr-tmp-*
+./tmp
