@@ -65,6 +65,8 @@ func Worker(sockname string, mapf func(string, string) []KeyValue,
 		default:
 			panic("Unknown task type received from coordinator")
 		}
+		args = GetTaskArgs{}
+		reply = GetTaskReply{}
 	}
 
 	// uncomment to send the Example RPC to the coordinator.
@@ -78,7 +80,7 @@ func Map(mapf func(string, string) []KeyValue, taskId int, filename string, nRed
 		panic(fmt.Sprintf("Error reading file: %v\n", filename))
 	}
 	// REMOVE THE [:200]
-	content := string(bytes[:200])
+	content := string(bytes)
 	kva := mapf(filename, content)
 
 	// Create nReduce partitions
@@ -136,30 +138,34 @@ func Reduce(reducef func(string, []string) string, taskId int, filename string, 
 		}
 	}
 
-	awaitPartitions := func() {
+	awaitPartitions := func() bool {
+		waited := 0
 		args := GetReducePartitionsArgs{}
 		reply := GetReducePartitionsReply{}
 		args.TaskId = taskId
-		err := call("Coordinator.GetReducePartitions", &args, &reply)
-		if err != nil {
-			panic(err)
-		}
-		for len(reply.Partitions) == 0 {
-			time.Sleep(time.Second)
+		gotNewPartitions := false
+		for !gotNewPartitions {
+			if waited == 8 {
+				return false
+			}
 			err := call("Coordinator.GetReducePartitions", &args, &reply)
 			if err != nil {
 				panic(err)
 			}
-		}
-		for _, partition := range reply.Partitions {
-			if _, ok := partitionsRead[partition]; ok {
-				continue
+
+			for _, partition := range reply.Partitions {
+				if _, ok := partitionsRead[partition]; ok {
+					continue
+				}
+				partitionsToRead[partition] = struct{}{}
+				gotNewPartitions = true
 			}
-			partitionsToRead[partition] = struct{}{}
+			if !gotNewPartitions {
+				waited += 1
+				time.Sleep(time.Second)
+			}
 		}
-		if len(reply.Partitions) == 0 {
-			time.Sleep(time.Second)
-		}
+		return true
 	}
 
 	for {
@@ -174,7 +180,9 @@ func Reduce(reducef func(string, []string) string, taskId int, filename string, 
 		fmt.Printf("PartitionsToRead: %d, PartitionsRead: %d\n", nPartitions, len(partitionsToRead))
 		if len(partitionsToRead) == 0 {
 			fmt.Printf("Waiting partitions. nPartitions: %d, partitionsDone: %d\n", nPartitions, len(partitionsToRead))
-			awaitPartitions()
+			if !awaitPartitions() {
+				return
+			}
 		}
 	}
 	fmt.Printf("Starting sort")
@@ -195,16 +203,22 @@ func Reduce(reducef func(string, []string) string, taskId int, filename string, 
 		res[key] = reducef(key, values)
 	}
 
-	outputFile, err := os.CreateTemp("/home/jasha/projects/6.5840/tmp", "")
+	wd, err := os.Getwd()
+	if err != nil {
+		log.Panicf("Failed to get wd: %v", err)
+	}
+	outputFile, err := os.CreateTemp(wd, "")
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create output file: %v\n", err))
 	}
-	enc := json.NewEncoder(outputFile)
-	if err := enc.Encode(res); err != nil {
-		panic("Failed to write to reduce output file")
+	// Write output
+	for k, v := range res {
+		outputFile.Write(fmt.Appendf([]byte{}, "%v %v\n", k, v))
 	}
+
 	defer outputFile.Close()
 	fmt.Printf("Reduce completed, output: %v\n", outputFile)
+
 	args := CompleteReduceTaskArgs{}
 	args.TaskId = taskId
 	args.OutputFile = outputFile.Name()

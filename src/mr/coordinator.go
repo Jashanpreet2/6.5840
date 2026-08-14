@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"sync"
@@ -37,11 +38,13 @@ const (
 type MapTask struct {
 	worker int
 	input  string
+	t      *time.Timer
 }
 
 // Reduce Task
 type ReduceTask struct {
 	partitions []string
+	t          *time.Timer
 }
 
 // Coordinator
@@ -50,6 +53,7 @@ type Coordinator struct {
 	l       sync.Mutex // For locking access to coordinator object
 	nMap    int        // No. of map tasks
 	nReduce int        // No. of reduce tasks
+	outDir  string
 
 	// Map tasks grouped by status: Idle, In Progress, and Complete
 	// Allows finding available tasks in O(1) when a worker requests a task.
@@ -62,6 +66,50 @@ type Coordinator struct {
 	idleReduces        map[int]*ReduceTask
 	inProgressReduces  map[int]*ReduceTask
 	completeReduces    map[int]*ReduceTask
+}
+
+func freeTask(c *Coordinator, taskType TaskType, taskId int) {
+	defer c.l.Unlock()
+	c.l.Lock()
+	name := map[TaskType]string{MapType: "Map", ReduceType: "Reduce"}[taskType]
+	fmt.Printf("Freeing task %d of type %v\n", taskId, name)
+	switch taskType {
+	case MapType:
+		if _, ok := c.inProgressMaps[taskId]; !ok {
+			return
+		}
+		c.inProgressMaps[taskId].t = nil
+		c.idleMaps[taskId] = c.inProgressMaps[taskId]
+		delete(c.inProgressMaps, taskId)
+	case ReduceType:
+		if _, ok := c.inProgressReduces[taskId]; !ok {
+			return
+		}
+		c.inProgressReduces[taskId].t = nil
+		c.idleReduces[taskId] = c.inProgressReduces[taskId]
+		delete(c.inProgressReduces, taskId)
+	default:
+		log.Panicf("Invalid task type receieved in freeTask: %d", taskType)
+	}
+}
+
+// taskId must be in c.inProgress{Reduces, Maps}. Must lock before starting
+func startTimer(c *Coordinator, taskType TaskType, taskId int) {
+	name := map[TaskType]string{MapType: "Map", ReduceType: "Reduce"}[taskType]
+	fmt.Printf("Started timer for %s task %d\n", name, taskId)
+	switch taskType {
+	case MapType:
+		c.inProgressMaps[taskId].t = time.AfterFunc(10*time.Second, func() {
+			freeTask(c, taskType, taskId)
+		})
+	case ReduceType:
+		c.inProgressReduces[taskId].t = time.AfterFunc(10*time.Second, func() {
+			freeTask(c, taskType, taskId)
+		})
+	default:
+		log.Panicf("Invalid task type receieved in freeTask: %d", taskType)
+	}
+	showState(c)
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -78,7 +126,11 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 
 		// Move to in progress
 		c.inProgressMaps[taskId] = task
+
 		delete(c.idleMaps, taskId)
+
+		// Start timer to free this task
+		startTimer(c, reply.TaskType, reply.TaskId)
 
 		return nil
 	}
@@ -92,6 +144,11 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 		}
 		c.inProgressReduces[taskId] = task
 		delete(c.idleReduces, taskId)
+
+		// Start timer to free task
+		// here
+		startTimer(c, reply.TaskType, reply.TaskId)
+
 		return nil
 	}
 
@@ -127,6 +184,9 @@ func (c *Coordinator) CompleteMapTask(args *CompleteMapTaskArgs, reply *Complete
 		return fmt.Errorf("Map task is already complete")
 	}
 
+	// Stop timer
+	c.inProgressMaps[args.TaskId].t.Stop()
+	c.inProgressMaps[args.TaskId].t = nil
 	c.completeMaps[args.TaskId] = c.inProgressMaps[args.TaskId]
 	delete(c.inProgressMaps, args.TaskId)
 
@@ -153,7 +213,21 @@ func (c *Coordinator) CompleteReduceTask(args *CompleteReduceTaskArgs, reply *Co
 	showState(c)
 	if task, ok := c.inProgressReduces[args.TaskId]; ok {
 		// Move from inProgressReduces to completeReduces
+		c.inProgressReduces[args.TaskId].t.Stop()
+		c.inProgressReduces[args.TaskId].t = nil
 		c.completeReduces[args.TaskId] = task
+		newFileName := fmt.Sprintf("mr-out-%d", args.TaskId)
+
+		path := filepath.Join(filepath.Dir(args.OutputFile), newFileName)
+		os.Rename(args.OutputFile, path)
+
+		// TEMP Test for correctness
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("Wrote file: %v", absPath)
+
 		delete(c.inProgressReduces, args.TaskId)
 	} else {
 		panic(fmt.Sprintf("Got completed message for reduce task (id: %d) not in progress\n", args.TaskId))
@@ -167,6 +241,7 @@ func (c *Coordinator) GetReducePartitions(args *GetReducePartitionsArgs, reply *
 	// Add guard against requesting for tasks which are complete or not started or never to be started
 	if task, ok := c.inProgressReduces[args.TaskId]; ok {
 		reply.Partitions = slices.Clone(task.partitions)
+		c.inProgressReduces[args.TaskId].t.Reset(10 * time.Second)
 		return nil
 	} else {
 		return fmt.Errorf("This reduce task is not in progress")
@@ -210,6 +285,10 @@ func keys(m map[int]*ReduceTask) []int {
 	return ks
 }
 func showState(c *Coordinator) {
+	for taskId, task := range c.inProgressReduces {
+		hasTimer := task.t != nil
+		fmt.Printf("Reduce task %d has timer? %v\n", taskId, hasTimer)
+	}
 	fmt.Printf("reduce keys: unavailable=%v idle=%v in-progress=%v complete=%v\n",
 		keys(c.unavailableReduces), keys(c.idleReduces), keys(c.inProgressReduces), keys(c.completeReduces))
 	fmt.Printf("maps (%d total):\n  idle: %d\n  in-progress: %d\n  complete: %d\nreduces (%d total):\n  unavailable: %d\n  idle: %d\n  in-progress: %d\n  complete: %d\n",
@@ -222,10 +301,10 @@ func showState(c *Coordinator) {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		l:       sync.Mutex{},
-		nMap:    len(files),
-		nReduce: nReduce,
-
+		l:              sync.Mutex{},
+		nMap:           len(files),
+		nReduce:        nReduce,
+		outDir:         filepath.Dir(files[0]),
 		idleMaps:       make(map[int]*MapTask, len(files)),
 		inProgressMaps: make(map[int]*MapTask, len(files)),
 		completeMaps:   make(map[int]*MapTask, len(files)),
@@ -235,7 +314,7 @@ func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator 
 		inProgressReduces:  make(map[int]*ReduceTask, nReduce),
 		completeReduces:    make(map[int]*ReduceTask, nReduce),
 	}
-
+	fmt.Printf("First file's dir: %v, dir of tmp.txt: %v\n", filepath.Dir(files[0]), filepath.Dir("tmp.txt"))
 	for i := range files {
 		c.idleMaps[i] = &MapTask{
 			worker: -1,
