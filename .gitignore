@@ -3,4 +3,5 @@ pkg/
 src/main/mr-out-*
 src/mr/tmp
 src/mr/mr-tmp-*
-./tmp
+src/mr/mr-out-*
+/tmp/
