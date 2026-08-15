@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MapReduce Runner</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, sans-serif;
+    max-width: 900px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+    line-height: 1.5;
+  }
+  h1 { font-size: 1.4rem; }
+  fieldset { border: 1px solid #8884; border-radius: 6px; margin-bottom: 1rem; }
+  legend { font-weight: 600; padding: 0 .4rem; }
+  label { display: block; margin: .5rem 0 .2rem; font-weight: 600; }
+  textarea {
+    width: 100%;
+    font-family: ui-monospace, monospace;
+    font-size: .85rem;
+    box-sizing: border-box;
+  }
+  input[type=number] { width: 6rem; }
+  button {
+    font-size: 1rem;
+    padding: .5rem 1.5rem;
+    cursor: pointer;
+  }
+  .hint { color: #888; font-size: .85rem; margin-top: .2rem; }
+</style>
+</head>
+<body>
+<h1>MapReduce Runner</h1>
+<p>Runs a job on the 6.5840 Lab&nbsp;1 MapReduce implementation: a coordinator plus
+N worker processes, with your Map and Reduce functions compiled into a Go plugin.</p>
+
+<form action="/run" method="post" enctype="multipart/form-data">
+  <fieldset>
+    <legend>Input</legend>
+    <label for="inputs">Input files</label>
+    <input id="inputs" type="file" name="inputs" multiple required>
+    <p class="hint">Each file becomes one map task (e.g. the pg-*.txt books).</p>
+
+    <label for="workers">Number of workers</label>
+    <input id="workers" type="number" name="workers" value="3" min="1" max="16">
+  </fieldset>
+
+  <fieldset>
+    <legend>Application</legend>
+    <label for="imports">Extra imports (one per line)</label>
+    <textarea id="imports" name="imports" rows="4">strings
+strconv
+unicode</textarea>
+    <p class="hint"><code>6.5840/mr</code> is always imported for <code>mr.KeyValue</code>.</p>
+
+    <label for="mapf">Map function</label>
+    <textarea id="mapf" name="mapf" rows="14" spellcheck="false">func Map(filename string, contents string) []mr.KeyValue {
+	// function to detect word separators.
+	ff := func(r rune) bool { return !unicode.IsLetter(r) }
+
+	// split contents into an array of words.
+	words := strings.FieldsFunc(contents, ff)
+
+	kva := []mr.KeyValue{}
+	for _, w := range words {
+		kva = append(kva, mr.KeyValue{Key: w, Value: "1"})
+	}
+	return kva
+}</textarea>
+
+    <label for="reducef">Reduce function</label>
+    <textarea id="reducef" name="reducef" rows="5" spellcheck="false">func Reduce(key string, values []string) string {
+	// return the number of occurrences of this word.
+	return strconv.Itoa(len(values))
+}</textarea>
+  </fieldset>
+
+  <button type="submit">Run job</button>
+</form>
+</body>
+</html>
