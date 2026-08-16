@@ -65,6 +65,7 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 		return
 	}
 	if v, ok := kv.storage[args.Key]; ok && v.version != args.Version {
+		DPrintf("Given version: %v, actual version: %v\n", args.Version, v.version)
 		reply.Err = rpc.ErrVersion
 		return
 	}
