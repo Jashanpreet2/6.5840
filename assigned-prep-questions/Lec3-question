@@ -1,0 +1,3 @@
+Q. Describe a sequence of events that would result in a client reading stale data from the Google File System.
+
+A. when the user has opened a file and is already looking at a replica and another user makes an update to a chunk of that file but the chunkserver that the first user is connected to fails to update that chunk due to network failure or such, the user will continue looking at a stale replica. this will be okay on the next open of the file as the chunkserver cache on client side is refreshed. This would also get fixed after the cache timesout, that is when the client will ask the master for the chunk information again.
