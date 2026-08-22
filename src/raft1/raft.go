@@ -220,7 +220,17 @@ func (rf *Raft) ticker() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
 
-
+		// Pause while not leader
+		rf.mu.Lock()
+		for rf.state == leader {
+			rf.mu.Unlock()
+			time.Sleep(2 * time.Millisecond)
+			rf.mu.Lock()
+		}
+		rf.mu.Unlock()
+		rf.mu.Lock()
+		rf.rpcReceived = false
+		rf.mu.Unlock()
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
