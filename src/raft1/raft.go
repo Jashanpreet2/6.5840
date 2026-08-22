@@ -39,7 +39,28 @@ type Raft struct {
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	currentTerm int
+	state       NodeState
+	votedFor    int
+	rpcReceived bool
+	// []Log     have to check what it looks like
 
+	// Temporary
+	LASTLOGINDEXTMP int
+	LASTLOGTERMTMP  int
+}
+
+type AppendEntryArgs struct {
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	Entries      []interface{} // Needs to be
+	LeaderCommit int           // Leader's commit index
+}
+
+type AppendEntryReply struct {
+	Term    int
+	Success bool
 }
 
 // return currentTerm and whether this server
