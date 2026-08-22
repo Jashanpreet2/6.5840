@@ -247,6 +247,11 @@ func (rf *Raft) ticker() {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
+		rf.mu.Lock()
+		if rf.state != leader && !rf.rpcReceived {
+			rf.mu.Unlock()
+			rf.startElection()
+		}
 
 		// Pause while not leader
 		rf.mu.Lock()
