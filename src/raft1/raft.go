@@ -21,6 +21,13 @@ import (
 	tester "6.5840/tester1"
 )
 
+type NodeState int
+
+const (
+	follower NodeState = iota
+	candidate
+	leader
+)
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -106,12 +113,18 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+	Term        int
+	VoteGranted bool
 }
 
 // example RequestVote RPC handler.
