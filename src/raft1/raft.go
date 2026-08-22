@@ -45,11 +45,8 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
 	// Your code here (3A).
-	return term, isleader
+	return rf.currentTerm, rf.state == leader
 }
 
 // save Raft's persistent state to stable storage,
