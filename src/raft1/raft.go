@@ -174,6 +174,46 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
+func (rf *Raft) startElection() {
+	rf.state = leader
+	voters := map[int]struct{}{}
+	for voterId := range rf.peers {
+		voters[voterId] = struct{}{}
+	}
+	delete(voters, rf.me)
+	votes := 1
+	votesNeeded := math.Floor(float64(len(rf.peers))/2.) + 1
+	args := &RequestVoteArgs{
+		Term:         rf.currentTerm,
+		LastLogIndex: rf.LASTLOGINDEXTMP,
+		LastLogTerm:  rf.LASTLOGTERMTMP,
+		CandidateId:  rf.me,
+	}
+	for rf.state == leader {
+		for len(voters) > 0 {
+			voterId := -1
+			for voterId = range voters {
+				break
+			}
+
+			reply := &RequestVoteReply{}
+			if !rf.sendRequestVote(voterId, args, reply) {
+				continue
+			}
+
+			// Current node is behind, quit being a candidate
+			if reply.Term > rf.currentTerm {
+				return
+			}
+
+			if reply.VoteGranted {
+				votes += 1
+			}
+			delete(voters, voterId)
+		}
+	}
+}
+
 func (rf *Raft) ticker() {
 	for true {
 
