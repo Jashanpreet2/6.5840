@@ -574,25 +574,13 @@ func (rf *Raft) syncer(index int) {
 			Logs:         rf.logs[rf.nextIndex[index]:],
 			LeaderCommit: rf.prevCommitIndex,
 		}
-		reply := &AppendEntryArgs{}
+		reply := &AppendEntryReply{}
 		rf.mu.Unlock()
 
-		for rf.peers[index].Call("Raft.AppendEntry", args, reply) {
-			rf.mu.Lock()
-			time.Sleep(1 * time.Millisecond) // so
-			// stop since we are not a leader anymore
+		for !rf.peers[index].Call("Raft.AppendEntry", args, reply) {
 			if rf.status != Leader {
 				return
 			}
-
-			// if we failed to send the rpc lets try again
-			if !appendentry {
-				continue
-			}
-
-			//appendentry failed so lets check if it was
-			nextIndex[index] -= 1
-			args.Logs = rf.logs[nextIndex[index]:]
 		}
 		if reply.Term > rf.currentTerm && reply.Success {
 			log.Fatalf("reply.Term > rf.currentTerm && reply.Success")
