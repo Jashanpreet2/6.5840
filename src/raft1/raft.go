@@ -11,6 +11,7 @@ import (
 	//	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"math/rand"
 	"sync"
@@ -35,6 +36,11 @@ func annotate(id int, desc, details string) {
 	tester.Annotate(server, desc, details)
 }
 
+type EntryLog struct {
+	term  int
+	entry interface{}
+}
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -50,8 +56,10 @@ type Raft struct {
 	status          NodeState
 	votedFor        int
 	rpcReceived     bool
-	// []Log     have to check what it looks like
+	logs            []EntryLog //have to check what it looks like
 
+	matchIndex []int
+	nextIndex  []int
 	// Temporary
 	LASTLOGINDEXTMP int
 	LASTLOGTERMTMP  int
@@ -62,8 +70,8 @@ type AppendEntryArgs struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      []interface{} // Needs to be
-	LeaderCommit int           // Leader's commit index
+	Logs         []EntryLog // Needs to be
+	LeaderCommit int        // Leader's commit index
 }
 
 type AppendEntryReply struct {
@@ -75,16 +83,16 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	annotate(rf.me, fmt.Sprintf("HB from %v", args.LeaderId), "")
+	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
-	rf.currentTerm = args.Term
 	rf.rpcReceived = true
 	if rf.status != Leader || args.Term > rf.currentTerm {
 		rf.status = Follower
 	}
+	rf.currentTerm = args.Term
 }
 
 // return currentTerm and whether this server
@@ -249,13 +257,27 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.status != Leader {
+		return -1, -1, false
+	}
+	rf.logs = append(rf.logs, EntryLog{
+		term:  rf.currentTerm,
+		entry: command,
+	},
+	)
+
+	// command is the entry that needs to be committed
+	// the current server needs to be the leader to follow
+	// through. if it is not the leader it returns falseit will be 0 indexed.
+	// the term is just the current term of the server. the index is the
+	// existing last index of the log array+1 i.e. equal to the length
+	// of the log array.
 
 	// Your code here (3B).
 
-	return index, term, isLeader
+	return len(rf.logs) - 1, rf.currentTerm, true
 }
 
 func (rf *Raft) startElection() {
@@ -375,43 +397,107 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) heartbeats() {
+	rf.mu.Lock()
+	wasLeader := rf.status == Leader
+	matchIndex := make([]int, len(rf.peers))
+	nextIndex := make([]int, len(rf.peers))
+	for i := range nextIndex {
+		nextIndex[i] = len(rf.logs) - 1
+	}
+	heartbeat := func(index int) {
+		if index == rf.me {
+			return
+		}
 
-	for {
-		time.Sleep(100 * time.Millisecond)
 		rf.mu.Lock()
 		if rf.status != Leader {
 			rf.mu.Unlock()
-			continue
+			return
 		}
-
 		args := &AppendEntryArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: rf.LASTLOGINDEXTMP,
 			PrevLogTerm:  rf.LASTLOGTERMTMP,
-			Entries:      []interface{}{},
+			Logs:         []EntryLog{},
 			LeaderCommit: rf.prevCommitIndex,
 		}
-		rf.mu.Unlock()
+		for rf.peers[index].Call("Raft.AppendEntry", args, reply) {
+			rf.mu.Lock()
+			time.Sleep(1 * time.Millisecond) // so
+			// stop since we are not a leader anymore
+			if rf.status != Leader {
+				return
+			}
 
-		DPrintf("%v sending heartbeats", rf.me)
-		reply := &AppendEntryReply{}
-
-		for i, peer := range rf.peers {
-			if i == rf.me {
+			// if we failed to send the rpc lets try again
+			if !appendentry {
 				continue
 			}
+
+			//appendentry failed so lets check if it was
+			nextIndex[index] -= 1
+			args.Logs = rf.logs[nextIndex[index]:]
+		}
+		if reply.Term > rf.currentTerm && reply.Success {
+			log.Fatalf("reply.Term > rf.currentTerm && reply.Success")
+		}
+		if matchIndex[index] != len(rf.logs)-1 {
+			args.Logs = rf.logs[nextIndex[index]:]
+		}
+
+		reply := &AppendEntryReply{}
+		rf.mu.Unlock()
+		ok := rf.peers[index].Call("Raft.AppendEntry", args, reply)
+		rf.mu.Lock()
+		annotate(rf.me, fmt.Sprintf("Heartbeated %v. Status: %v, term: %v", index, ok, reply.Term), "")
+		if reply.Term > rf.currentTerm && reply.Success {
+			log.Fatalf("reply.Term > rf.currentTerm && reply.Success")
+		}
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.status = Follower
+			rf.mu.Unlock()
+			return
+		} else if reply.Success {
+
+		}
+		if rf.status == Leader {
+
+		}
+		rf.mu.Unlock()
+	}
+	rf.mu.Unlock()
+
+	for {
+		time.Sleep(100 * time.Millisecond)
+		rf.mu.Lock()
+
+		// Reset volatile index state. needs to be recalculated
+		// next time the node becomes leader
+		if wasLeader && rf.status != Leader {
+			for i := range matchIndex {
+				matchIndex[i] = 0
+				nextIndex[i] = 0
+			}
+		}
+		if rf.status != Leader {
+			if wasLeader {
+				wasLeader = false
+
+			}
+			rf.mu.Unlock()
+			continue
+		}
+		for i := range nextIndex {
+			nextIndex[i] = len(rf.logs) - 1
+		}
+		wasLeader = true
+		rf.mu.Unlock()
+		for i := range rf.peers {
 			// peer called. caller. response.
 			annotate(rf.me, fmt.Sprintf("Heartbeating %v", i), "")
-			ok := peer.Call("Raft.AppendEntry", args, reply)
-			annotate(rf.me, fmt.Sprintf("Heartbeat %v. Status: %v", i, ok), "")
-			if reply.Term > rf.currentTerm {
-				rf.mu.Lock()
-				rf.currentTerm = reply.Term
-				rf.status = Follower
-				rf.mu.Unlock()
-				break
-			}
+			go heartbeat(i)
 		}
 	}
 }
@@ -428,6 +514,95 @@ func (rf *Raft) updates() {
 	}
 }
 
+func (rf *Raft) syncer(index int) {
+	if index == rf.me {
+		return
+	}
+	rf.mu.Lock()
+	wasntLeader := rf.status == Leader
+	rf.mu.Unlock()
+	rf.mu.Lock()
+	if rf.status != Leader {
+		rf.mu.Unlock()
+		return
+	}
+	for {
+		rf.mu.Lock()
+		// Wait until becoming leader
+		if rf.status != Leader {
+			wasntLeader = true
+			time.Sleep(1 * time.Millisecond)
+			rf.mu.Unlock()
+			continue
+		}
+
+		// Reset match index if just became a leader
+		if wasntLeader {
+			wasntLeader = false
+			rf.matchIndex[index] = 0
+			rf.nextIndex[index] = len(rf.logs) - 1
+		}
+		rf.mu.Unlock()
+
+		// Keep waiting until there is a new log to append
+		for {
+			rf.mu.Lock()
+			status := rf.status
+			matchedUntil := rf.matchIndex[index]
+			lenLogs := len(rf.logs)
+			rf.mu.Unlock()
+			if status != Leader || matchedUntil < lenLogs {
+				break
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+
+		// Check if still leader
+		rf.mu.Lock()
+		status := rf.status
+		rf.mu.Unlock()
+		// No longer leader so quit
+		if status != Leader {
+			continue
+		}
+
+		args := &AppendEntryArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: rf.nextIndex[index] - 1,
+			PrevLogTerm:  rf.logs[rf.nextIndex[index]-1].term,
+			Logs:         rf.logs[rf.nextIndex[index]:],
+			LeaderCommit: rf.prevCommitIndex,
+		}
+		reply := &AppendEntryArgs{}
+		rf.mu.Unlock()
+
+		for rf.peers[index].Call("Raft.AppendEntry", args, reply) {
+			rf.mu.Lock()
+			time.Sleep(1 * time.Millisecond) // so
+			// stop since we are not a leader anymore
+			if rf.status != Leader {
+				return
+			}
+
+			// if we failed to send the rpc lets try again
+			if !appendentry {
+				continue
+			}
+
+			//appendentry failed so lets check if it was
+			nextIndex[index] -= 1
+			args.Logs = rf.logs[nextIndex[index]:]
+		}
+		if reply.Term > rf.currentTerm && reply.Success {
+			log.Fatalf("reply.Term > rf.currentTerm && reply.Success")
+		}
+		if matchIndex[index] != len(rf.logs)-1 {
+			args.Logs = rf.logs[nextIndex[index]:]
+		}
+	}
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -439,7 +614,23 @@ func (rf *Raft) updates() {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *tester.Persister, applyCh chan raftapi.ApplyMsg) raftapi.Raft {
-	rf := &Raft{}
+	rf := &Raft{
+		peers:     peers,
+		persister: persister,
+		me:        me,
+
+		prevCommitIndex: 0,
+		currentTerm:     0,
+		status:          Follower,
+		votedFor:        -1,
+		rpcReceived:     true,
+
+		matchIndex: make([]int, len(peers)),
+		nextIndex:  make([]int, len(peers)),
+
+		LASTLOGINDEXTMP: 4,
+		LASTLOGTERMTMP:  4,
+	}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
@@ -462,5 +653,40 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ticker()
 	go rf.heartbeats()
 	go rf.updates()
+	for index := range rf.peers {
+		if index == rf.me {
+			continue
+		}
+		go rf.syncer(index)
+	}
 	return rf
 }
+
+/*
+The leader logs something to itself and continuously
+sends appendEntry rpcs to the other nodes for the logs that
+they have not yet logged. once a majority has logged upto a
+certain index the leads commits the index. on each appendEntry
+rpc it tells them the latest commit index it is at.
+the followers which receive the rpc commit up to that
+index too (if they have logs up to that index).
+
+leader gets a command
+logs command to itself
+
+§5.3 Log matching: If two logs contain an entry with
+the same log index and term then the logs are identical up to
+that point.
+
+Ergo from 5.3, the current leader has to find the latest
+entry with matching index and term for each peer and
+send updates from that point forward. The leader's log
+is canon at any point and is to be replicated. Leaders
+never overwrite their own log but the followers do
+overwrite their log if the leader tells them to given
+that the leader's provided prevLogIndex and prevLogTerm match
+i.e. the entries are same up to that point otherwise they need
+to go further back.
+thing to handle:
+1. leader sends
+*/
