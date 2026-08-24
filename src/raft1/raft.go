@@ -9,10 +9,10 @@ package raft
 
 import (
 	//	"bytes"
+	"context"
 	"fmt"
 	"math"
 	"math/rand"
-	"slices"
 	"sync"
 	"time"
 
@@ -259,90 +259,86 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 func (rf *Raft) startElection() {
-	DPrintf("%v starting election", rf.me)
-	defer func() {
-		DPrintf("%v exiting startElection", rf.me)
-	}()
+	annotate(rf.me, "starting election", "")
 	rf.mu.Lock()
+
 	rf.status = Candidate
 	rf.currentTerm += 1
-	voters := []int{}
-	for voterId := range rf.peers {
-		if voterId != rf.me {
-			voters = append(voters, voterId)
-		}
-	}
 	votes := 1
 	votesNeeded := int(math.Floor(float64(len(rf.peers))/2.)) + 1
-	args := &RequestVoteArgs{
-		Term:         rf.currentTerm,
-		LastLogIndex: rf.LASTLOGINDEXTMP,
-		LastLogTerm:  rf.LASTLOGTERMTMP,
-		CandidateId:  rf.me,
-	}
-	rf.mu.Unlock()
 
 	// Timout
 	timeout := time.After(300 * time.Millisecond)
-	for rf.status == Candidate && len(voters) > 0 && votes < votesNeeded {
-		rf.mu.Lock()
-		DPrintf("%v looping. votes: %v, needvotes: %v", rf.me, votes, votesNeeded)
-		rf.mu.Unlock()
-		for len(voters) > 0 && votes < votesNeeded {
-			rf.mu.Lock() //2
-			DPrintf("%v looping\n", rf.me)
-			rf.mu.Unlock() //2
-			select {
-			case _ = <-timeout:
-				rf.status = Follower
-				return
-			default:
-				rf.mu.Lock() //3
-
-				DPrintf("%v startElection hasn't timed out", rf.me)
-				rf.mu.Unlock() //4
-			}
-			voterId := voters[rand.Intn(len(voters))]
-
-			reply := &RequestVoteReply{}
-			rf.mu.Lock() //5
-			annotate(rf.me, fmt.Sprintf("RequestVote %v", voterId), "")
-			DPrintf("%v RequestVote -> %v", rf.me, voterId)
-			rf.mu.Unlock() //5
-			if !rf.sendRequestVote(voterId, args, reply) {
-				DPrintf("%v RequestVote -> %v failed", rf.me, voterId)
-				annotate(rf.me, fmt.Sprintf("RequestVote %v: failed", voterId), "")
-				continue
-			}
-			annotate(rf.me, fmt.Sprintf("RequestVote %v, %v", voterId, reply.VoteGranted), "")
-			voters = slices.DeleteFunc(voters, func(v int) bool { return v == voterId })
-			rf.mu.Lock() //7
-
-			DPrintf("%v RequestVote -> %v got response", rf.me, voterId)
-			DPrintf("%v hasnt timed out", rf.me)
-
-			// Current node is behind, quit being a Candidate
-
-			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.status = Follower
-				rf.mu.Unlock() //8
-				return
-			}
-
-			if reply.VoteGranted {
-				votes += 1
-			}
-			rf.mu.Unlock()
-
+	ctx, cancel := context.WithCancel(context.Background())
+	for i, peer := range rf.peers {
+		if i == rf.me {
+			continue
 		}
+		go func(term int, ctx context.Context) {
+			for {
+				rf.mu.Lock()
+				if votes >= votesNeeded || rf.status != Candidate {
+					rf.mu.Unlock()
+					return
+				}
+				args := &RequestVoteArgs{
+					Term:         term,
+					CandidateId:  rf.me,
+					LastLogIndex: rf.LASTLOGINDEXTMP,
+					LastLogTerm:  rf.LASTLOGTERMTMP,
+				}
+				reply := &RequestVoteReply{}
+				rf.mu.Unlock()
+				annotate(rf.me, fmt.Sprintf("RequestVote -> %v", i), "")
+				if !peer.Call("Raft.RequestVote", args, reply) {
+					continue
+				}
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.status = Follower
+				} else if reply.VoteGranted {
+					votes += 1
+				}
+				rf.mu.Unlock()
+				return
+			}
+		}(rf.currentTerm, ctx)
 	}
+	rf.mu.Unlock()
+Loop:
+	for {
+		select {
+		case _ = <-timeout:
+			rf.mu.Lock()
+			rf.status = Follower
+			rf.mu.Unlock()
+			break Loop
+		default:
+			DPrintf("%v startElection hasn't timed out", rf.me)
+		}
 
-	DPrintf("%v Suff votes: %v, isCandidate: %v", rf.me, votes >= votesNeeded, rf.status == Candidate)
-	if votes >= votesNeeded && rf.status == Candidate {
-		DPrintf("%v has become leader", rf.me)
-		rf.status = Leader
+		rf.mu.Lock()
+		if rf.status == Follower {
+			annotate(rf.me, "Become follower", "")
+			rf.mu.Unlock()
+			break Loop
+		}
+		if votes >= votesNeeded {
+			annotate(rf.me, "Leader", "")
+			rf.status = Leader
+			rf.mu.Unlock()
+			break Loop
+		}
+		rf.mu.Unlock()
+		time.Sleep(1 * time.Millisecond)
 	}
+	cancel()
 }
 
 func (rf *Raft) ticker() {
@@ -379,6 +375,7 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) heartbeats() {
+
 	for {
 		time.Sleep(100 * time.Millisecond)
 		rf.mu.Lock()
@@ -386,6 +383,7 @@ func (rf *Raft) heartbeats() {
 			rf.mu.Unlock()
 			continue
 		}
+
 		args := &AppendEntryArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
@@ -394,22 +392,27 @@ func (rf *Raft) heartbeats() {
 			Entries:      []interface{}{},
 			LeaderCommit: rf.prevCommitIndex,
 		}
+		rf.mu.Unlock()
+
 		DPrintf("%v sending heartbeats", rf.me)
 		reply := &AppendEntryReply{}
+
 		for i, peer := range rf.peers {
 			if i == rf.me {
 				continue
 			}
 			// peer called. caller. response.
+			annotate(rf.me, fmt.Sprintf("Heartbeating %v", i), "")
 			ok := peer.Call("Raft.AppendEntry", args, reply)
 			annotate(rf.me, fmt.Sprintf("Heartbeat %v. Status: %v", i, ok), "")
 			if reply.Term > rf.currentTerm {
+				rf.mu.Lock()
 				rf.currentTerm = reply.Term
 				rf.status = Follower
+				rf.mu.Unlock()
 				break
 			}
 		}
-		rf.mu.Unlock()
 	}
 }
 
@@ -417,8 +420,8 @@ func (rf *Raft) updates() {
 	for {
 		// i want to know the status and the
 		rf.mu.Lock()
-		DPrintf("%v status: %v", rf.me, rf.status)
-		desc := fmt.Sprintf("Status: %v\n", rf.status)
+		DPrintf("%v status: %v, term: %v", rf.me, rf.status, rf.currentTerm)
+		desc := fmt.Sprintf("Status: %v, Term: %v\n", rf.status, rf.currentTerm)
 		annotate(rf.me, "Status", desc)
 		rf.mu.Unlock()
 		time.Sleep(1 * time.Second)
