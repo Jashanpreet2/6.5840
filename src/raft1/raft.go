@@ -398,12 +398,6 @@ func (rf *Raft) ticker() {
 
 func (rf *Raft) heartbeats() {
 	rf.mu.Lock()
-	wasLeader := rf.status == Leader
-	matchIndex := make([]int, len(rf.peers))
-	nextIndex := make([]int, len(rf.peers))
-	for i := range nextIndex {
-		nextIndex[i] = len(rf.logs) - 1
-	}
 	heartbeat := func(index int) {
 		if index == rf.me {
 			return
@@ -417,35 +411,11 @@ func (rf *Raft) heartbeats() {
 		args := &AppendEntryArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
-			PrevLogIndex: rf.LASTLOGINDEXTMP,
-			PrevLogTerm:  rf.LASTLOGTERMTMP,
+			PrevLogIndex: 0,
+			PrevLogTerm:  0,
 			Logs:         []EntryLog{},
 			LeaderCommit: rf.prevCommitIndex,
 		}
-		for rf.peers[index].Call("Raft.AppendEntry", args, reply) {
-			rf.mu.Lock()
-			time.Sleep(1 * time.Millisecond) // so
-			// stop since we are not a leader anymore
-			if rf.status != Leader {
-				return
-			}
-
-			// if we failed to send the rpc lets try again
-			if !appendentry {
-				continue
-			}
-
-			//appendentry failed so lets check if it was
-			nextIndex[index] -= 1
-			args.Logs = rf.logs[nextIndex[index]:]
-		}
-		if reply.Term > rf.currentTerm && reply.Success {
-			log.Fatalf("reply.Term > rf.currentTerm && reply.Success")
-		}
-		if matchIndex[index] != len(rf.logs)-1 {
-			args.Logs = rf.logs[nextIndex[index]:]
-		}
-
 		reply := &AppendEntryReply{}
 		rf.mu.Unlock()
 		ok := rf.peers[index].Call("Raft.AppendEntry", args, reply)
@@ -459,11 +429,6 @@ func (rf *Raft) heartbeats() {
 			rf.status = Follower
 			rf.mu.Unlock()
 			return
-		} else if reply.Success {
-
-		}
-		if rf.status == Leader {
-
 		}
 		rf.mu.Unlock()
 	}
@@ -471,29 +436,6 @@ func (rf *Raft) heartbeats() {
 
 	for {
 		time.Sleep(100 * time.Millisecond)
-		rf.mu.Lock()
-
-		// Reset volatile index state. needs to be recalculated
-		// next time the node becomes leader
-		if wasLeader && rf.status != Leader {
-			for i := range matchIndex {
-				matchIndex[i] = 0
-				nextIndex[i] = 0
-			}
-		}
-		if rf.status != Leader {
-			if wasLeader {
-				wasLeader = false
-
-			}
-			rf.mu.Unlock()
-			continue
-		}
-		for i := range nextIndex {
-			nextIndex[i] = len(rf.logs) - 1
-		}
-		wasLeader = true
-		rf.mu.Unlock()
 		for i := range rf.peers {
 			// peer called. caller. response.
 			annotate(rf.me, fmt.Sprintf("Heartbeating %v", i), "")
