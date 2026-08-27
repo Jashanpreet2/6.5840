@@ -141,7 +141,10 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		rf.stepDown(args.Term)
 		rf.mu.Lock()
 	}
-	rf.commitIndex = max(rf.commitIndex, args.LeaderCommit)
+	if args.LeaderCommit > len(rf.logs) {
+		log.Panicf("args.LeaderCommit > len(rf.logs)")
+	}
+	rf.commitIndex = max(args.LeaderCommit, rf.commitIndex)
 
 	// Nothing to append, its a heartbeat message
 	if len(args.Logs) == 0 {
@@ -262,8 +265,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	// Check if their term is at least the same as ours
 	if args.Term < rf.currentTerm {
+		desc = "args.Term < rf.currentTerm"
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		rf.mu.Unlock()
 		return
 	}
 	rf.rpcReceived = true
@@ -286,6 +291,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 	} else {
+		desc = "Log is behind"
 		reply.VoteGranted = false
 	}
 
@@ -486,14 +492,13 @@ func (rf *Raft) heartbeats() {
 			rf.mu.Unlock()
 			return
 		}
-		commitIndex := min(rf.matchIndex[index], rf.commitIndex)
 		args := &AppendEntryArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: 0,
 			PrevLogTerm:  0,
 			Logs:         []EntryLog{},
-			LeaderCommit: commitIndex,
+			LeaderCommit: min(rf.matchIndex[index], rf.commitIndex),
 		}
 		reply := &AppendEntryReply{}
 		rf.mu.Unlock()
@@ -583,7 +588,7 @@ MainLoop:
 			PrevLogIndex: rf.nextIndex[index] - 1,
 			PrevLogTerm:  rf.logs[rf.nextIndex[index]-1].Term,
 			Logs:         rf.logs[rf.nextIndex[index]:curLen],
-			LeaderCommit: rf.commitIndex,
+			LeaderCommit: min(rf.matchIndex[index], rf.commitIndex),
 		}
 		reply := &AppendEntryReply{}
 		annotate(rf.me, fmt.Sprintf("Appending to %v", index), fmt.Sprintf("%v", args.Logs))
