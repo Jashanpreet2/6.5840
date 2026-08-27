@@ -9,6 +9,7 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
@@ -81,6 +83,9 @@ type AppendEntryArgs struct {
 type AppendEntryReply struct {
 	Term    int
 	Success bool
+	XTerm   int
+	XIndex  int
+	XLogLen int
 }
 
 func (rf *Raft) termIsGreater(term int) bool {
@@ -97,11 +102,12 @@ func (rf *Raft) isLeader() bool {
 
 func (rf *Raft) stepDown(newTerm int) {
 	rf.mu.Lock()
+	defer rf.persist()
+	defer rf.mu.Unlock()
 	annotate(rf.me, "Stepping down", fmt.Sprintf("Old term: %v, new term: %v", rf.currentTerm, newTerm))
 	if rf.currentTerm > newTerm {
 		log.Panicf("Asked to step down into a lower term")
 	}
-	defer rf.mu.Unlock()
 	rf.status = Follower
 	if rf.currentTerm < newTerm {
 		rf.votedFor = -1
@@ -120,6 +126,7 @@ func (rf *Raft) stepDown(newTerm int) {
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
+	defer rf.persist()
 	defer rf.mu.Unlock()
 	if len(args.Logs) > 0 {
 		original := slices.Clone(rf.logs)
@@ -155,12 +162,25 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	// Check if prev log term matches for the specified index
 	if args.PrevLogIndex >= len(rf.logs) || args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
 		reply.Success = false
+		reply.XLogLen = len(rf.logs)
 		annotate(rf.me, "AppendEntry Rejected", "")
 		if args.PrevLogIndex >= len(rf.logs) {
 			annotate(rf.me, "PrevLogIndex too large", fmt.Sprintf("My log length: %v. Given PrevLogIndex: %v", len(rf.logs), args.PrevLogIndex))
+			reply.XLogLen = len(rf.logs)
 		} else if args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
+			reply.XLogLen = -1
+			reply.XTerm = rf.logs[args.PrevLogIndex].Term
+			i := args.PrevLogIndex + 1
+			for ; i > 0 && rf.logs[i-1].Term == reply.XTerm; i -= 1 {
+			}
+			reply.XIndex = i
+			annotate(rf.me, "PrevLogTerm doesn't match", fmt.Sprintf("My term (index %v): %v,given term: %v", args.PrevLogIndex, rf.logs[args.PrevLogIndex].Term, args.PrevLogTerm))
 		}
+		annotate(rf.me, fmt.Sprintf("XLogLen: %v, XTerm: %v, XIndex: %v", reply.XLogLen, reply.XTerm, reply.XIndex), fmt.Sprintf("PrevLogIndex: %v, PrevLogTerm: %v, Mine: %v	\nReceived: %v", args.PrevLogIndex, args.PrevLogTerm, rf.logs, args.Logs))
 		return
+	}
+	if args.Logs[0].Index < rf.commitIndex {
+		log.Panicf("Appendentry request below commit index")
 	}
 	rf.logs = slices.Concat(rf.logs[:args.PrevLogIndex+1], args.Logs)
 	for i, entry := range rf.logs {
@@ -188,6 +208,17 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
+
 	// Your code here (3C).
 	// Example:
 	// w := new(bytes.Buffer)
@@ -205,17 +236,20 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (3C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var logs []EntryLog
+	var currentTerm int
+	var votedFor int
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&logs) != nil {
+		log.Panicf("Failed to decode")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.logs = logs
+	}
 }
 
 // how many bytes in Raft's persisted log?
@@ -279,6 +313,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.stepDown(args.Term)
 	}
 	rf.mu.Lock()
+	defer rf.persist()
 	defer rf.mu.Unlock()
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		desc = "Already voted this term"
@@ -344,6 +379,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
+	defer rf.persist()
 	defer rf.mu.Unlock()
 	if rf.status != Leader {
 		return -1, -1, false
@@ -377,6 +413,9 @@ func (rf *Raft) startElection() {
 	votes := 1
 	votesNeeded := int(math.Floor(float64(len(rf.peers))/2.)) + 1
 
+	rf.mu.Unlock()
+	rf.persist()
+	rf.mu.Lock()
 	// Timout
 	timeout := time.After(300 * time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -446,6 +485,7 @@ Loop:
 		time.Sleep(1 * time.Millisecond)
 	}
 	cancel()
+	rf.persist()
 }
 
 func (rf *Raft) ticker() {
@@ -616,7 +656,20 @@ MainLoop:
 		// the prev log did not match. So let's go one step back.
 		rf.mu.Lock()
 		if !reply.Success {
-			rf.nextIndex[index] -= 1
+			oldIndex := rf.nextIndex[index]
+			if reply.XLogLen > 0 {
+				rf.nextIndex[index] = reply.XLogLen
+			} else {
+				i := len(rf.logs) - 1
+				for ; i > 0 && rf.logs[i-1].Term != reply.XTerm; i -= 1 {
+				}
+				if i > 0 {
+					rf.nextIndex[index] = i
+				} else {
+					rf.nextIndex[index] = reply.XIndex
+				}
+			}
+			annotate(rf.me, fmt.Sprintf("Updated NextIndex for %v", index), fmt.Sprintf("Old Index: %v, New Index: %v	\nMy Logs: %v", oldIndex, rf.nextIndex[index], rf.logs))
 		} else {
 			annotate(rf.me, fmt.Sprintf("Synced up to %v with %v", curLen-1, index), "")
 			// Matched until curlen-1 since that is the last index we sent and it was successful
@@ -635,6 +688,7 @@ MainLoop:
 			}
 		}
 		rf.mu.Unlock()
+		rf.persist()
 		// check if commitindex can be changed and commit if so
 		// if matchIndex[index] != len(rf.logs)-1 {
 		// 	args.Logs = rf.logs[nextIndex[index]:]
