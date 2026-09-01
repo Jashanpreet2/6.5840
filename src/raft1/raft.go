@@ -30,9 +30,11 @@ import (
 
 var f, err = os.OpenFile("debug.txt", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 
+var startTime time.Time
+
 func annotate(id int, desc, details string) {
 	server := fmt.Sprintf("Server %v", id)
-	tester.Annotate(server, desc, details)
+	tester.Annotate(server, fmt.Sprintf("%v: %v", time.Now().Sub(startTime).Round(time.Second), desc), details)
 	// if err != nil {
 	// 	log.Panic(err)
 	// }
@@ -95,6 +97,7 @@ type AppendEntryArgs struct {
 	PrevLogTerm        int
 	Logs               []EntryLog // Needs to be
 	LeaderCommit       int        // Leader's commit index
+	Id                 int
 }
 
 type AppendEntryReply struct {
@@ -200,12 +203,12 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	defer rf.mu.Unlock()
 	if len(args.Logs) > 0 {
 		original := slices.Clone(rf.logs)
-		annotate(rf.me, fmt.Sprintf("AppendEntry from %v", args.LeaderId), fmt.Sprintf("Received term: %v. My term: %v", args.Term, rf.currentTerm))
+		annotate(rf.me, fmt.Sprintf("AppendEntry from %v", args.LeaderId), fmt.Sprintf("Id: %v, Received term: %v. My term: %v", args.Id, args.Term, rf.currentTerm))
 		defer func() {
 			annotate(rf.me, "AppendEntry permutations", fmt.Sprintf("From: %v\nAdded: %v\nFinal: %v\n     Reply success: %v, term: %v, xloglen: %v, xindex: %v, xterm: %v", original, args.Logs, rf.logs, reply.Success, reply.Term, reply.XLogLen, reply.XIndex, reply.XTerm))
 		}()
 	} else {
-		annotate(rf.me, fmt.Sprintf("HB from %v", args.LeaderId), fmt.Sprintf("Received term: %v. My term: %v", args.Term, rf.currentTerm))
+		annotate(rf.me, fmt.Sprintf("HB from %v", args.LeaderId), fmt.Sprintf("Id: %v, Received term: %v. My term: %v", args.Id, args.Term, rf.currentTerm))
 	}
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
@@ -287,6 +290,8 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.status == Leader
 }
 
+var persistTime = false
+
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
@@ -301,6 +306,9 @@ func (rf *Raft) persist(snapshot []byte) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 
+	if persistTime {
+		e.Encode(startTime)
+	}
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.logs)
@@ -333,16 +341,23 @@ func (rf *Raft) readPersist(raftState []byte, snapshot []byte) {
 	// Example:
 	r := bytes.NewBuffer(raftState)
 	d := labgob.NewDecoder(r)
+
 	var logs []EntryLog
 	var currentTerm int
 	var votedFor int
 	var snapshotInfo SnapshotInfo
+
+	var tmpStartTime time.Time
+	if persistTime && d.Decode(&tmpStartTime) != nil {
+		startTime = tmpStartTime
+	}
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&logs) != nil ||
 		d.Decode(&snapshotInfo) != nil {
 		log.Panicf("Failed to decode")
 	} else {
+		startTime = tmpStartTime
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.logs = logs
@@ -558,7 +573,7 @@ func (rf *Raft) startElection() {
 		go func(term int, ctx context.Context) {
 			for {
 				rf.mu.Lock()
-				if votes >= votesNeeded || rf.status != Candidate {
+				if votes >= votesNeeded || rf.status != Candidate || rf.currentTerm != term {
 					rf.mu.Unlock()
 					return
 				}
@@ -615,7 +630,7 @@ Loop:
 			break Loop
 		}
 		rf.mu.Unlock()
-		time.Sleep(1 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
 	rf.persistLock(nil)
@@ -643,13 +658,11 @@ func (rf *Raft) ticker() {
 			time.Sleep(2 * time.Millisecond)
 			rf.mu.Lock()
 		}
-		rf.mu.Unlock()
-		rf.mu.Lock()
 		rf.rpcReceived = false
 		rf.mu.Unlock()
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 300 + (rand.Int63() % 200)
+		ms := 240 + (rand.Int63() % 200)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -671,12 +684,15 @@ func (rf *Raft) heartbeats() {
 			PrevLogTerm:        0,
 			Logs:               []EntryLog{},
 			LeaderCommit:       min(rf.matchIndex[index], rf.commitIndex),
+			Id:                 rand.Int(),
 		}
 		reply := &AppendEntryReply{}
+		annotate(rf.me, fmt.Sprintf("Heartbeating %v", index), fmt.Sprintf("Id: %v", args.Id))
+
 		rf.mu.Unlock()
 		ok := rf.peers[index].Call("Raft.AppendEntry", args, reply)
 		rf.mu.Lock()
-		annotate(rf.me, fmt.Sprintf("RPC: Heartbeated %v. Status: %v, term: %v", index, ok, reply.Term), "")
+		annotate(rf.me, fmt.Sprintf("RPC: Heartbeated %v. Status: %v, term: %v,", index, ok, reply.Term), "")
 		if reply.Term > rf.currentTerm && reply.Success {
 			log.Fatalf("reply.Term > rf.currentTerm && reply.Success")
 		}
@@ -693,7 +709,6 @@ func (rf *Raft) heartbeats() {
 		}
 		for i := range rf.peers {
 			// peer called. caller. response.
-			annotate(rf.me, fmt.Sprintf("Heartbeating %v", i), "")
 			go heartbeat(i)
 		}
 	}
@@ -743,6 +758,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		annotate(rf.me, "Snapshot Rejected. My term is greater", fmt.Sprintf("My term: %v. Args.Term: %v", rf.currentTerm, args.Term))
 		return
 	}
+	rf.rpcReceived = true
 	if args.Term > rf.currentTerm {
 		rf.mu.Unlock()
 		rf.stepDownLock(args.Term)
@@ -756,7 +772,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotTerm:  args.SnapshotInfo.LastIncludedTerm,
 		SnapshotIndex: args.SnapshotInfo.LastIncludedIndex,
 	}
+	rf.mu.Unlock()
 	rf.applyCh <- msg
+	rf.mu.Lock()
 	rf.commitIndex = args.SnapshotInfo.LastIncludedIndex
 	rf.snapshotInfo.LastIncludedIndex = args.SnapshotInfo.LastIncludedIndex
 	rf.snapshotInfo.LastIncludedTerm = args.SnapshotInfo.LastIncludedTerm
@@ -879,26 +897,29 @@ MainLoop:
 			PrevLogTerm:        prevLogTerm,
 			Logs:               rf.logs[rf.index(rf.nextIndex[index]):rf.index(curLen)],
 			LeaderCommit:       min(rf.matchIndex[index], rf.commitIndex),
+			Id:                 rand.Int(),
 		}
 		reply := &AppendEntryReply{}
-		annotate(rf.me, fmt.Sprintf("RPC: Appending to %v", index), fmt.Sprintf("PrevLogChronoIndex: %v, PrevLogTerm: %v, Mine: %v, Sending: %v", args.PrevLogChronoIndex, args.PrevLogTerm, rf.logs, args.Logs))
+		annotate(rf.me, fmt.Sprintf("RPC: Appending to %v", index), fmt.Sprintf("Id: %v, PrevLogChronoIndex: %v, PrevLogTerm: %v, Mine: %v, Sending: %v", args.Id, args.PrevLogChronoIndex, args.PrevLogTerm, rf.logs, args.Logs))
 		rf.mu.Unlock()
 
 		for !rf.peers[index].Call("Raft.AppendEntry", args, reply) && rf.isLeaderLock() {
 			rf.mu.Lock() // good
-			annotate(rf.me, fmt.Sprintf("RPC: Appending to %v", index), fmt.Sprintf("PrevLogChronoIndex: %v, PrevLogTerm: %v, Mine: %v, Sending: %v", args.PrevLogChronoIndex, args.PrevLogTerm, rf.logs, args.Logs))
+			annotate(rf.me, fmt.Sprintf("RPC: Reappending to %v", index), fmt.Sprintf("Id: %v, PrevLogChronoIndex: %v, PrevLogTerm: %v, Mine: %v, Sending: %v", args.Id, args.PrevLogChronoIndex, args.PrevLogTerm, rf.logs, args.Logs))
 			if rf.nextIndex[index] <= rf.snapshotInfo.LastIncludedIndex {
+				annotate(rf.me, fmt.Sprintf("Appending to %v: Exit, nextIndex snapshotted", index), "")
 				rf.mu.Unlock()
 				continue MainLoop
 			}
 			rf.mu.Unlock()
 		}
+		annotate(rf.me, fmt.Sprintf("Appending to %v: Exited", index), "")
 		if !rf.isLeaderLock() {
 			continue MainLoop
 		}
 
 		if rf.termIsGreater(reply.Term) && reply.Success {
-			log.Fatalf("Impossible state 569: reply.Term > rf.currentTerm && reply.Success")
+			log.Panicf("Impossible state 569: reply.Term > rf.currentTerm && reply.Success")
 		}
 
 		if rf.termIsGreater(reply.Term) {
@@ -1048,7 +1069,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			LastIncludedTerm:  0,
 		},
 	}
-
+	startTime = time.Now()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
 	for i := range rf.nextIndex {
