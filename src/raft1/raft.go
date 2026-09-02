@@ -205,8 +205,8 @@ func (rf *Raft) stepDownLock(newTerm int) {
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
-	defer rf.persistLock(nil)
 	defer rf.mu.Unlock()
+	defer rf.persist(nil)
 	if len(args.Logs) > 0 {
 		original := slices.Clone(rf.logs)
 		annotate(rf.me, fmt.Sprintf("AppendEntry from %v", args.LeaderId), fmt.Sprintf("Id: %v, Received term: %v. My term: %v", args.Id, args.Term, rf.currentTerm))
@@ -492,7 +492,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.mu.Unlock()
 		return
 	}
-	rf.rpcReceived = true
 
 	reply.Term = args.Term
 	rf.mu.Unlock()
@@ -513,6 +512,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	myLastLogIndex, myLastLogTerm := rf.getLastIndexAndTerm()
 	if args.LastLogTerm > myLastLogTerm || (args.LastLogTerm == myLastLogTerm && args.LastLogIndex >= myLastLogIndex) {
 		desc = "Voted"
+		rf.rpcReceived = true
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 	} else {
@@ -572,8 +572,6 @@ func (rf *Raft) startElection() {
 	annotate(rf.me, fmt.Sprintf("starting election: %v", rf.currentTerm), "")
 
 	rf.persist(nil)
-	rf.mu.Unlock()
-	rf.mu.Lock()
 	// Timout
 	timeout := time.After(300 * time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -620,15 +618,16 @@ func (rf *Raft) startElection() {
 	rf.mu.Unlock()
 Loop:
 	for rf.isCandidateLock() {
+		rf.mu.Lock()
 		select {
 		case _ = <-timeout:
-			rf.stepDownLock(rf.currentTerm)
+			rf.stepDown(rf.currentTerm)
+			rf.mu.Unlock()
 			break Loop
 		default:
 			// DPrintf("%v startElection hasn't timed out", rf.me)
 		}
 
-		rf.mu.Lock()
 		if rf.status == Follower {
 			annotate(rf.me, "Become follower", "")
 			rf.mu.Unlock()
@@ -856,49 +855,82 @@ MainLoop:
 			}
 			time.Sleep(2 * time.Millisecond)
 		}
+		rf.mu.Lock()
 		term := rf.currentTerm
 		var snapshotReply *InstallSnapshotReply = nil
-		rf.mu.Lock()
+		installSnapshotReplyMutex := sync.Mutex{}
+	SnapshotLoop:
 		// While the nextindex < snapshotted index and server is leader and the term hasn't changed
 		for rf.nextIndex[index] <= rf.snapshotInfo.LastIncludedIndex && rf.isLeader() && rf.currentTerm == term {
+			rf.mu.Unlock()
+			rf.mu.Lock()
 			annotate(rf.me, fmt.Sprintf("Installing snapshot on %v", index), fmt.Sprintf("nextIndex[index]: %v, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.nextIndex[index], rf.snapshotInfo.LastIncludedIndex, rf.snapshotInfo.LastIncludedTerm))
 			snapshot := rf.persister.ReadSnapshot()
-
+			ctx, cancel := context.WithCancel(context.Background())
 			if len(snapshot) == 0 {
 				log.Panicf("Installing snapshot with len 0. rf.nextIndex[index]: %v, snapshot lastIndex: %v", rf.nextIndex[index], rf.snapshotInfo.LastIncludedIndex)
 			}
 
-			args := InstallSnapshotArgs{
-				Term:         rf.currentTerm,
+			args := &InstallSnapshotArgs{
+				Term:         term,
 				LeaderId:     rf.me,
 				SnapshotInfo: rf.snapshotInfo,
 				Snapshot:     snapshot,
 			}
-			reply := InstallSnapshotReply{}
 
 			annotate(rf.me, fmt.Sprintf("RPC: InstallSnapshot %v", index), "")
 			rf.mu.Unlock()
+			go func(args *InstallSnapshotArgs, ctx context.Context) {
+				mySnapshotReply := &InstallSnapshotReply{}
+				success := rf.peers[index].Call("Raft.InstallSnapshot", args, mySnapshotReply)
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					installSnapshotReplyMutex.Lock()
+					defer installSnapshotReplyMutex.Unlock()
+					if success && snapshotReply == nil {
+						snapshotReply = mySnapshotReply
+					}
+				}
+			}(args, ctx)
+			// send snapshot until successful
+			// if received term greater then step down and continue
+			// the code after this if should never be executed, it should be continued either time.Wednesday
 
-			for !rf.peers[index].Call("Raft.InstallSnapshot", &args, &reply) && rf.isLeaderLock() {
-				rf.mu.Lock()
-				annotate(rf.me, fmt.Sprintf("RPC: Re InstallSnapshot %v", index), "")
-				rf.mu.Unlock()
+			timer := time.NewTimer(400 * time.Millisecond)
+			for {
+				select {
+				case <-timer.C:
+					cancel()
+					rf.mu.Lock()
+					continue SnapshotLoop
+				default:
+				}
+
+				installSnapshotReplyMutex.Lock()
+				if snapshotReply == nil {
+					installSnapshotReplyMutex.Unlock()
+					time.Sleep(10 * time.Millisecond)
+					continue
+				} else {
+					installSnapshotReplyMutex.Unlock()
+					break
+				}
 			}
+
 			rf.mu.Lock()
 			if args.Term < rf.currentTerm {
 				rf.mu.Unlock()
 				continue MainLoop
 			}
-			if rf.termIsGreater(reply.Term) {
-				rf.stepDown(reply.Term)
+			if rf.termIsGreater(snapshotReply.Term) {
+				rf.stepDown(snapshotReply.Term)
 			} else {
 				rf.matchIndex[index] = args.SnapshotInfo.LastIncludedIndex
 				rf.nextIndex[index] = rf.matchIndex[index] + 1
 			}
 			rf.mu.Unlock()
-			// send snapshot until successful
-			// if received term greater then step down and continue
-			// the code after this if should never be executed, it should be continued either time.Wednesday
 
 			continue MainLoop
 		}
@@ -986,9 +1018,11 @@ MainLoop:
 			// cancel()
 		}
 
-		replyMutex.Lock()
+		if reply == nil {
+			continue MainLoop
+		}
+
 		// fmt.Printf("Reply: %v\n", reply)
-		replyMutex.Unlock()
 		// for !rf.peers[index].Call("Raft.AppendEntry", args, reply) && rf.isLeaderLock() {
 		// 	rf.mu.Lock() // good
 		// 	annotate(rf.me, fmt.Sprintf("RPC: Reappending to %v", index), fmt.Sprintf("Id: %v, PrevLogChronoIndex: %v, PrevLogTerm: %v, Mine: %v, Sending: %v", args.Id, args.PrevLogChronoIndex, args.PrevLogTerm, rf.logs, args.Logs))
@@ -999,11 +1033,11 @@ MainLoop:
 			continue MainLoop
 		}
 
-		if rf.termIsGreaterLock(reply.Term) && reply.Success {
+		rf.mu.Lock()
+		if rf.termIsGreater(reply.Term) && reply.Success {
 			log.Panicf("Impossible state 569: reply.Term > rf.currentTerm && reply.Success")
 		}
 
-		rf.mu.Lock()
 		if rf.termIsGreater(reply.Term) {
 			rf.stepDown(reply.Term)
 			rf.mu.Unlock()
@@ -1014,11 +1048,9 @@ MainLoop:
 			rf.mu.Unlock()
 			continue MainLoop
 		}
-		rf.mu.Unlock()
 
 		// Since our term is greater and we are the leader, the failure has occurred because
 		// the prev log did not match. So let's go one step back.
-		rf.mu.Lock()
 		if !reply.Success {
 			oldIndex := rf.nextIndex[index]
 			if reply.XLogLen > 0 {
@@ -1054,8 +1086,8 @@ MainLoop:
 				rf.commitUntilIndex = max(rf.commitUntilIndex, newCommitIndex)
 			}
 		}
+		rf.persist(nil)
 		rf.mu.Unlock()
-		rf.persistLock(nil)
 	}
 }
 
