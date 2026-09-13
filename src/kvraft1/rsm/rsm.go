@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
@@ -19,6 +20,11 @@ type Op struct {
 	Me  int
 	Id  uint64
 	Req any
+}
+
+type WatchCommitResponse struct {
+	result any
+	err    rpc.Err
 }
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
@@ -43,7 +49,7 @@ type RSM struct {
 	// Your definitions here.
 
 	reqId    uint64
-	channels map[uint64]chan any
+	channels map[uint64]chan WatchCommitResponse
 }
 
 func annotate(id int, desc, details string) {
@@ -53,6 +59,7 @@ func annotate(id int, desc, details string) {
 }
 
 func (rsm *RSM) watchCommits(applyCh chan raftapi.ApplyMsg) {
+	var nextToSend *uint64 = nil
 	for msg := <-applyCh; true; msg = <-applyCh {
 		rsm.mu.Lock()
 		if msg.SnapshotValid && msg.CommandValid {
@@ -68,7 +75,12 @@ func (rsm *RSM) watchCommits(applyCh chan raftapi.ApplyMsg) {
 			rsm.mu.Unlock()
 			continue
 		}
-		rsm.channels[op.Id] <- res
+		rsm.channels[op.Id] <- WatchCommitResponse{res, rpc.OK}
+		for i := nextToSend; i != nil && *i < op.Id; *i++ {
+			rsm.channels[op.Id] <- WatchCommitResponse{nil, rpc.ErrWrongLeader}
+		}
+		nextToSend = new(uint64)
+		*nextToSend = op.Id + 1
 		rsm.mu.Unlock()
 	}
 }
@@ -94,11 +106,13 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
+		reqId:        0,
+		channels:     map[uint64]chan WatchCommitResponse{},
 	}
 	if !tester.UseRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
-
+	go rsm.watchCommits(rsm.applyCh)
 	return rsm
 }
 
@@ -118,13 +132,25 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	rsm.mu.Lock()
 	op := Op{Me: rsm.me, Id: rsm.reqId, Req: req}
 	rsm.reqId += 1
-	rsm.channels[op.Id] = make(chan any)
-	defer delete(rsm.channels, op.Id)
-	_, _, isLeader := rsm.rf.Start(op)
+	channel := make(chan WatchCommitResponse)
+	rsm.channels[op.Id] = channel
+	defer func() { rsm.mu.Lock(); delete(rsm.channels, op.Id); rsm.mu.Unlock() }()
+	_, commitTerm, isLeader := rsm.rf.Start(op)
 	rsm.mu.Unlock()
 
 	if !isLeader {
 		return rpc.ErrWrongLeader, nil // i'm dead, try another server.
 	}
-
+	for {
+		currentTerm, _ := rsm.rf.GetState()
+		select {
+		case doOpResponse := <-channel:
+			return doOpResponse.err, doOpResponse.result
+		default:
+		}
+		if currentTerm != commitTerm {
+			return rpc.ErrWrongLeader, nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
