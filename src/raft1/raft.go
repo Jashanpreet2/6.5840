@@ -317,6 +317,8 @@ func (rf *Raft) persist(snapshot []byte) {
 	e.Encode(rf.votedFor)
 	e.Encode(rf.logs)
 	e.Encode(rf.snapshotInfo)
+	e.Encode(rf.committedIndex)
+	e.Encode(rf.commitUntilIndex)
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, snapshot)
 
@@ -350,6 +352,8 @@ func (rf *Raft) readPersist(raftState []byte, snapshot []byte) {
 	var currentTerm int
 	var votedFor int
 	var snapshotInfo SnapshotInfo
+	var committedIndex int
+	var commitUntilIndex int
 
 	var tmpStartTime time.Time
 	if persistTime && d.Decode(&tmpStartTime) != nil {
@@ -358,15 +362,20 @@ func (rf *Raft) readPersist(raftState []byte, snapshot []byte) {
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&logs) != nil ||
-		d.Decode(&snapshotInfo) != nil {
+		d.Decode(&snapshotInfo) != nil ||
+		d.Decode(&committedIndex) != nil ||
+		d.Decode(&commitUntilIndex) != nil {
 		log.Panicf("Failed to decode")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.logs = logs
 		rf.snapshotInfo = snapshotInfo
-		rf.committedIndex = rf.snapshotInfo.LastIncludedIndex
-		rf.commitUntilIndex = rf.snapshotInfo.LastIncludedIndex
+		if rf.snapshotInfo.LastIncludedIndex < rf.committedIndex {
+			log.Panicf("rf.snapshotInfo.LastIncludedIndex < rf.committedIndex")
+		}
+		rf.committedIndex = committedIndex
+		rf.commitUntilIndex = commitUntilIndex
 	}
 
 	if len(snapshot) == 0 {
@@ -789,12 +798,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.snapshotInfo.LastIncludedIndex = args.SnapshotInfo.LastIncludedIndex
 	rf.snapshotInfo.LastIncludedTerm = args.SnapshotInfo.LastIncludedTerm
 	rf.logs = []EntryLog{}
+	rf.persist(args.Snapshot)
 	rf.mu.Unlock()
 	rf.applyCh <- msg
 	rf.mu.Lock()
 
 	annotate(rf.me, fmt.Sprintf("Installed snapshot from %v", args.LeaderId), fmt.Sprintf("snapshotInfo lastIndex: %v, lastTerm: %v, my logs: %v", rf.snapshotInfo.LastIncludedIndex, rf.snapshotInfo.LastIncludedTerm, rf.logs))
-	rf.persist(args.Snapshot)
 
 	//deferred rf.mu.unlock unlocks here
 }
@@ -1094,7 +1103,6 @@ MainLoop:
 var committed = []EntryLog{}
 
 func (rf *Raft) committer() {
-
 	for {
 		rf.mu.Lock()
 		if rf.committedIndex == rf.commitUntilIndex {
@@ -1131,6 +1139,7 @@ func (rf *Raft) committer() {
 				break
 			}
 			rf.committedIndex = entry.Index
+			rf.persist(nil)
 			annotate(rf.me, "Committed", fmt.Sprintf("All committed: %v", committed))
 		}
 		if commitUntilIndex < rf.committedIndex {
