@@ -33,8 +33,8 @@ var f, err = os.OpenFile("debug.txt", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 var startTime time.Time
 
 func annotate(id int, desc, details string) {
-	// server := fmt.Sprintf("Server %v", id)
-	// tester.Annotate(server, fmt.Sprintf("%v: %v", time.Since(startTime).Round(time.Second), desc), details)
+	server := fmt.Sprintf("Server %v", id)
+	tester.Annotate(server, fmt.Sprintf("%v: %v", time.Since(startTime).Round(time.Second), desc), details)
 	// if err != nil {
 	// 	log.Panic(err)
 	// }
@@ -52,7 +52,7 @@ const (
 type EntryLog struct {
 	Index int
 	Term  int
-	Entry []byte
+	Entry any
 }
 
 func (entry *EntryLog) String() string {
@@ -108,6 +108,16 @@ type AppendEntryReply struct {
 	XTerm   int
 	XIndex  int
 	XLogLen int
+}
+
+func (rf *Raft) termIsEqual(term int) bool {
+	return rf.currentTerm == term
+}
+
+func (rf *Raft) termIsEqualLock(term int) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.termIsEqual(term)
 }
 
 func (rf *Raft) termIsGreater(term int) bool {
@@ -206,24 +216,25 @@ func (rf *Raft) stepDownLock(newTerm int) {
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	myid := rand.Int()
 	s := time.Now()
-	defer func() { fmt.Printf("%v AppendEntry time with persist: %v\n", myid, time.Since(s)) }()
+	defer func() { NoPrintf("%v AppendEntry time with persist: %v\n", myid, time.Since(s)) }()
 
 	rf.mu.Lock()
-	fmt.Printf("%v Appendentry time to acquire lock: %v\n", myid, time.Since(s))
+	NoPrintf("%v Appendentry time to acquire lock: %v\n", myid, time.Since(s))
 	defer rf.mu.Unlock()
 	defer rf.persist(nil)
-	defer func() { fmt.Printf("%v AppendEntry time without persist: %v\n", myid, time.Since(s)) }()
+	defer func() { NoPrintf("%v AppendEntry time without persist: %v\n", myid, time.Since(s)) }()
 
-	// if len(args.Logs) > 0 {
-	// 	// original := slices.Clone(rf.logs)
-	// 	original := "temp placeholder"
-	// 	annotate(rf.me, fmt.Sprintf("AppendEntry from %v", args.LeaderId), fmt.Sprintf("Id: %v, Received term: %v. My term: %v", args.Id, args.Term, rf.currentTerm))
-	// 	defer func() {
-	// 		annotate(rf.me, "AppendEntry permutations", fmt.Sprintf("From: %v\nAdded: %v\nFinal: %v\n     Reply success: %v, term: %v, xloglen: %v, xindex: %v, xterm: %v", original, args.Logs, rf.logs, reply.Success, reply.Term, reply.XLogLen, reply.XIndex, reply.XTerm))
-	// 	}()
-	// } else {
-	// 	annotate(rf.me, fmt.Sprintf("HB from %v", args.LeaderId), fmt.Sprintf("Id: %v, Received term: %v. My term: %v", args.Id, args.Term, rf.currentTerm))
-	// }
+	if len(args.Logs) > 0 {
+		// original := slices.Clone(rf.logs)
+		original := "temp placeholder"
+		annotate(rf.me, fmt.Sprintf("AppendEntry from %v", args.LeaderId), fmt.Sprintf("Id: %v, Received term: %v. My term: %v", args.Id, args.Term, rf.currentTerm))
+		defer func() {
+			annotate(rf.me, "AppendEntry permutations", fmt.Sprintf("From: %v\nAdded: %v\nFinal: %v\n     Reply success: %v, term: %v, xloglen: %v, xindex: %v, xterm: %v", original, args.Logs, rf.logs, reply.Success, reply.Term, reply.XLogLen, reply.XIndex, reply.XTerm))
+		}()
+	} else {
+		annotate(rf.me, fmt.Sprintf("HB from %v", args.LeaderId), fmt.Sprintf("Id: %v, Received term: %v. My term: %v", args.Id, args.Term, rf.currentTerm))
+	}
+
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		annotate(rf.me, "AppendEntry rejected", fmt.Sprintf("Args.Term (%v) < rf.currentTerm (%v)", args.Term, rf.currentTerm))
@@ -246,7 +257,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Success = true
 		return
 	}
-	fmt.Printf("%v Appendentry time to assert len(args.logs) > 0: %v\n", myid, time.Since(s))
+	NoPrintf("%v Appendentry time to assert len(args.logs) > 0: %v\n", myid, time.Since(s))
 
 	if args.PrevLogChronoIndex < rf.snapshotInfo.LastIncludedIndex {
 		log.Panicf("Leader tried to append at log index which has already been snapshotted")
@@ -258,7 +269,6 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.XLogLen = rf.getLogLen() //essentially our new log length
 		annotate(rf.me, "AppendEntry Rejected", "")
 		annotate(rf.me, "PrevLogIndex too large", fmt.Sprintf("My log length: %v. Given PrevLogIndex: %v", rf.getLogLen(), args.PrevLogChronoIndex))
-		reply.XLogLen = rf.getLogLen()
 		annotate(rf.me, fmt.Sprintf("XLogLen: %v, XTerm: %v, XIndex: %v", reply.XLogLen, reply.XTerm, reply.XIndex), fmt.Sprintf("PrevLogIndex: %v, PrevLogTerm: %v, Mine: %v	\nReceived: %v", args.PrevLogChronoIndex, args.PrevLogTerm, rf.logs, args.Logs))
 		return
 	}
@@ -286,16 +296,15 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 	appendstarttime := time.Now()
 	rf.logs = slices.Concat(rf.logs[:rf.index(prevLogChronoIndex+1)], args.Logs)
-	fmt.Printf("%v Appendentry time to append since start: %v, actual: %v\n", myid, time.Since(s), time.Since(appendstarttime))
+	NoPrintf("%v Appendentry time to append since start: %v, actual: %v\n", myid, time.Since(s), time.Since(appendstarttime))
 
-	for i, entry := range rf.logs {
-		if rf.index(entry.Index) != i {
-			log.Panicf("Index does not match")
-		}
-	}
+	// for i, entry := range rf.logs {
+	// 	if rf.index(entry.Index) != i {
+	// 		log.Panicf("Index does not match")
+	// 	}
+	// }
 	reply.Success = true
-	rf.commitUntilIndex = args.LeaderCommit
-
+	rf.commitUntilIndex = max(args.LeaderCommit, rf.commitUntilIndex)
 }
 
 // return currentTerm and whether this server
@@ -318,7 +327,7 @@ var persistTime = false
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist(snapshot []byte) {
 	s := time.Now()
-	defer func() { fmt.Printf("Persist time: %v\n", time.Since(s)) }()
+	defer func() { NoPrintf("Persist time: %v\n", time.Since(s)) }()
 	if snapshot == nil {
 		snapshot = rf.persister.ReadSnapshot()
 	}
@@ -332,7 +341,7 @@ func (rf *Raft) persist(snapshot []byte) {
 	e.Encode(rf.votedFor)
 	timeLogEncode := time.Now()
 	e.Encode(rf.logs)
-	fmt.Printf("Time it took to encode log for persist: %v\n. Bytes: %v", time.Since(timeLogEncode), w.Len())
+	NoPrintf("Time it took to encode log for persist: %v\n. Bytes: %v", time.Since(timeLogEncode), w.Len())
 	e.Encode(rf.snapshotInfo)
 	e.Encode(rf.committedIndex)
 	e.Encode(rf.commitUntilIndex)
@@ -396,6 +405,10 @@ func (rf *Raft) readPersist(raftState []byte, snapshot []byte) {
 			log.Panicf("persist: committedIndex (%v) < snapshotInfo.LastIncludedIndex (%v)", rf.committedIndex, rf.snapshotInfo.LastIncludedIndex)
 		}
 		rf.committedIndex = rf.snapshotInfo.LastIncludedIndex
+		if commitUntilIndex < rf.committedIndex {
+			log.Panicf("persist: commitUntilIndex (%v) < snapshotInfo.LastIncludedIndex (%v)", rf.committedIndex, rf.snapshotInfo.LastIncludedIndex)
+
+		}
 		rf.commitUntilIndex = commitUntilIndex
 	}
 
@@ -480,7 +493,7 @@ func (rf *Raft) Snapshot(chronoIndex int, snapshot []byte) { //data was original
 	rf.snapshotInfo.LastIncludedIndex = chronoIndex
 	rf.snapshotInfo.LastIncludedTerm = rf.logs[arrayIndex].Term
 	// msgs := rf.snapshotToMsgs(snapshot)
-	// fmt.Printf("Snapshot Messages: %v\n", msgs)
+	// NoPrintf("Snapshot Messages: %v\n", msgs)
 	rf.logs = slices.Clone(rf.logs[arrayIndex+1:])
 
 	annotate(rf.me, "Snapshotted", fmt.Sprintf("lastChronoIndex: %v, lastTerm: %v, new logs: %v", rf.snapshotInfo.LastIncludedIndex, rf.snapshotInfo.LastIncludedTerm, rf.logs))
@@ -527,7 +540,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Unlock()
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	go rf.persist(nil)
+	defer rf.persist(nil)
 
 	if rf.termIsGreater(args.Term) {
 		rf.stepDown(args.Term)
@@ -565,24 +578,24 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	s := time.Now()
 	myid := rand.Int()
-	defer func() { fmt.Printf("%v Start time: %v\n", myid, time.Since(s)) }()
+	defer func() { NoPrintf("%v Start time: %v\n", myid, time.Since(s)) }()
 	rf.mu.Lock()
-	fmt.Printf("%v Start: Time to acquire lock: %v\n", myid, time.Since(s))
+	NoPrintf("%v Start: Time to acquire lock: %v\n", myid, time.Since(s))
 	defer rf.mu.Unlock()
 
 	if rf.status != Leader {
 		return -1, -1, false
 	}
-	// prevLogs := rf.logs
+	prevLogs := rf.logs
 	rf.logs = append(rf.logs, EntryLog{
 		Index: rf.getLogLen(),
 		Term:  rf.currentTerm,
-		Entry: command.([]byte),
+		Entry: command,
 	},
 	)
-	fmt.Printf("%v Start: Time to create new log: %v\n", myid, time.Since(s))
+	NoPrintf("%v Start: Time to create new log: %v\n", myid, time.Since(s))
 
-	// annotate(rf.me, fmt.Sprintf("Start(%v)", command), fmt.Sprintf("Command's index(LogLen): %v, Prev logs: %v, New logs: %v", rf.getLogLen(), prevLogs, rf.logs))
+	annotate(rf.me, fmt.Sprintf("Start(%v)", command), fmt.Sprintf("Command's index(LogLen): %v, Prev logs: %v, New logs: %v", rf.getLogLen(), prevLogs, rf.logs))
 
 	// command is the entry that needs to be committed
 	// the current server needs to be the leader to follow
@@ -594,7 +607,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (3B).
 	persiststarttime := time.Now()
 	rf.persist(nil)
-	defer func() { fmt.Printf("%v Start total time to persist: %v\n", myid, time.Since(persiststarttime)) }()
+	defer func() { NoPrintf("%v Start total time to persist: %v\n", myid, time.Since(persiststarttime)) }()
 
 	return rf.logs[len(rf.logs)-1].Index, rf.currentTerm, true
 }
@@ -701,7 +714,7 @@ func (rf *Raft) ticker() {
 
 		// Pause while leader
 		for rf.isLeaderLock() {
-			time.Sleep(2 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 
 		rf.mu.Lock()
@@ -717,9 +730,6 @@ func (rf *Raft) ticker() {
 func (rf *Raft) heartbeats() {
 	heartbeat := func(index int) {
 		if index == rf.me {
-			return
-		}
-		if !rf.isLeaderLock() {
 			return
 		}
 
@@ -816,6 +826,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.stepDown(args.Term)
 	}
 	if args.SnapshotInfo.LastIncludedIndex < rf.commitUntilIndex {
+		annotate(rf.me, "InstallSnapshot Rejected", fmt.Sprintf("snapshot lastincluded index %v, rf.commitUntilIndex: %v, rf.committedIndex: %v", args.SnapshotInfo.LastIncludedIndex, rf.commitUntilIndex, rf.committedIndex))
 		return
 	}
 	if args.SnapshotInfo.LastIncludedIndex < rf.snapshotInfo.LastIncludedIndex {
@@ -902,9 +913,12 @@ MainLoop:
 		term := rf.currentTerm
 		var snapshotReply *InstallSnapshotReply = nil
 		installSnapshotReplyMutex := sync.Mutex{}
+		snapshotsent := false
+		continuedloop := false
 	SnapshotLoop:
 		// While the nextindex < snapshotted index and server is leader and the term hasn't changed
-		for rf.nextIndex[index] <= rf.snapshotInfo.LastIncludedIndex && rf.isLeader() && rf.currentTerm == term {
+		for rf.nextIndex[index] <= rf.snapshotInfo.LastIncludedIndex {
+			snapshotsent = true
 			rf.mu.Unlock()
 			rf.mu.Lock()
 			annotate(rf.me, fmt.Sprintf("Installing snapshot on %v", index), fmt.Sprintf("nextIndex[index]: %v, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.nextIndex[index], rf.snapshotInfo.LastIncludedIndex, rf.snapshotInfo.LastIncludedTerm))
@@ -975,9 +989,16 @@ MainLoop:
 			}
 			rf.mu.Unlock()
 
+			continuedloop = true
 			continue MainLoop
 		}
 
+		if continuedloop {
+			fmt.Printf("Continued mainloop but still here?\n")
+		}
+		if snapshotsent {
+			log.Panicf("Snapshot sent but still trying to send appendentry\n")
+		}
 		// Prepare args and reply objects
 		curLen := rf.getLogLen()
 		var prevLogIndex int
@@ -1066,16 +1087,13 @@ MainLoop:
 			continue MainLoop
 		}
 
-		// fmt.Printf("Reply: %v\n", reply)
+		// NoPrintf("Reply: %v\n", reply)
 		// for !rf.peers[index].Call("Raft.AppendEntry", args, reply) && rf.isLeaderLock() {
 		// 	rf.mu.Lock() // good
 		// 	annotate(rf.me, fmt.Sprintf("RPC: Reappending to %v", index), fmt.Sprintf("Id: %v, PrevLogChronoIndex: %v, PrevLogTerm: %v, Mine: %v, Sending: %v", args.Id, args.PrevLogChronoIndex, args.PrevLogTerm, rf.logs, args.Logs))
 
 		// }
 		annotate(rf.me, fmt.Sprintf("Appending to %v: Exited", index), "")
-		if !rf.isLeaderLock() {
-			continue MainLoop
-		}
 
 		rf.mu.Lock()
 		if rf.termIsGreater(reply.Term) && reply.Success {
@@ -1111,7 +1129,7 @@ MainLoop:
 			}
 			annotate(rf.me, fmt.Sprintf("Updated NextIndex for %v", index), fmt.Sprintf("Old Index: %v, New Index: %v	\nMy Logs: %v", oldIndex, rf.nextIndex[index], rf.logs))
 		} else {
-			// fmt.Printf("Synced up to %v with %v", curLen-1, index)
+			// NoPrintf("Synced up to %v with %v", curLen-1, index)
 			annotate(rf.me, fmt.Sprintf("Synced up to %v with %v", curLen-1, index), "")
 			// Matched until curlen-1 since that is the last index we sent and it was successful
 			rf.matchIndex[rf.me] = curLen - 1
@@ -1135,14 +1153,14 @@ MainLoop:
 	}
 }
 
-var committed = []EntryLog{}
+// var committed = []EntryLog{}
 
 func (rf *Raft) committer() {
 	for {
 		rf.mu.Lock()
 		if rf.committedIndex == rf.commitUntilIndex {
-			time.Sleep(1 * time.Millisecond)
 			rf.mu.Unlock()
+			time.Sleep(1 * time.Millisecond)
 			continue
 		}
 		if rf.committedIndex > rf.commitUntilIndex {
@@ -1155,31 +1173,44 @@ func (rf *Raft) committer() {
 		// 	rf.mu.Unlock()
 		// 	continue
 		// }
+		// myid := rand.Int()
 		commitUntilIndex := rf.commitUntilIndex
-		// fmt.Printf("rf.committedIndex: %v, rf.logs: %v, rf.index(rf.committedIndex+1): %v\n", rf.committedIndex, rf.logs, rf.index(rf.committedIndex+1))
-		for _, entry := range rf.logs[rf.index(rf.committedIndex+1):min(rf.index(commitUntilIndex+1), rf.getLogLen()-1)] {
-			annotate(rf.me, fmt.Sprintf("Committing {index: %v value: %v}", entry.Index, entry.Entry), fmt.Sprintf("rf.index(prevCommitIndex+1): %v, prevCommitIndex: %v, logs: %v", rf.index(rf.committedIndex+1), rf.committedIndex, rf.logs))
+		// NoPrintf("rf.committedIndex: %v, rf.logs: %v, rf.index(rf.committedIndex+1): %v\n", rf.committedIndex, rf.logs, rf.index(rf.committedIndex+1))
+		// startCommitTime := time.Now()
+		if rf.index(rf.getLogLen()) > len(rf.logs) {
+			log.Panicf("logs: %v\n rf.getloglen(): %v\n snapshotlastindex: %v\n", rf.logs, rf.getLogLen(), rf.snapshotInfo.LastIncludedIndex)
+		}
+		entries := slices.Clone(rf.logs[rf.index(rf.committedIndex+1):rf.index(min(commitUntilIndex+1, rf.getLogLen()))])
+		rf.mu.Unlock()
+		for i := range entries {
+			entry := entries[i]
 			applyMsg := raftapi.ApplyMsg{
 				Command:      entry.Entry,
 				CommandValid: true,
 				CommandIndex: entry.Index,
 			}
-			committed = append(committed, entry)
-			rf.mu.Unlock()
+			// committed = append(committed, entry)
+			// NoPrintf("%v committer unlocked in %v", myid, time.Since(startCommitTime))
 			rf.applyCh <- applyMsg
 			rf.mu.Lock()
+			annotate(rf.me, fmt.Sprintf("Committing {index: %v value: %v}", entry.Index, entry.Entry), fmt.Sprintf("rf.index(prevCommitIndex+1): %v, prevCommitIndex: %v, logs: %v", rf.index(rf.committedIndex+1), rf.committedIndex, rf.logs))
+			// startCommitTime = time.Now()
 			rf.persist(nil)
+
 			// InstallSnapshot has committed above the current batch being commieted here
+
 			if rf.committedIndex >= commitUntilIndex {
+				rf.mu.Unlock()
 				break
 			}
+			rf.committedIndex = entry.Index
 			if entry.Index < rf.committedIndex {
 				log.Panicf("entry.Index < rf.committedIndex")
 			}
-			rf.committedIndex = entry.Index
-			annotate(rf.me, "Committed", fmt.Sprintf("All committed: %v", committed))
+			rf.mu.Unlock()
+			// annotate(rf.me, "Committed", fmt.Sprintf("All committed: %v", committed))
 		}
-		rf.mu.Unlock()
+		// NoPrintf("%v Total time to commit: %v", myid, time.Since(startCommitTime))
 	}
 }
 
@@ -1192,9 +1223,9 @@ func (rf *Raft) setup() {
 	// 		CommandValid: true,
 	// 		CommandIndex: rf.logs[0].Index,
 	// 	}
-	// 	fmt.Printf("Sending")
+	// 	NoPrintf("Sending")
 	// 	rf.applyCh <- applyMsg
-	// 	fmt.Printf("Sent")
+	// 	NoPrintf("Sent")
 	// 	rf.commitIndex = 0
 	// }
 	rf.mu.Unlock()
