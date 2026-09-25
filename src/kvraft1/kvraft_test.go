@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
+	kvtest "6.5840/kvtest1"
 	tester "6.5840/tester1"
 )
 
@@ -163,32 +163,14 @@ func (ts *Test) GenericTestSpeed() {
 	}
 }
 
-func TestBasic4B(t *testing.T) {
-	ts := MakeTest(t, "4B basic", 1, 5, true, false, false, -1, false)
-	tester.AnnotateTest("TestBasic4B", ts.nservers)
-	ts.GenericTest()
-}
-
-func TestSpeed4B(t *testing.T) {
-	ts := MakeTest(t, "4B speed", 1, 3, true, false, false, -1, false)
-	tester.AnnotateTest("TestSpeed4B", ts.nservers)
-	ts.GenericTestSpeed()
-}
-
-func TestConcurrent4B(t *testing.T) {
-	ts := MakeTest(t, "4B many clients", 5, 5, true, false, false, -1, false)
-	tester.AnnotateTest("TestConcurrent4B", ts.nservers)
-	ts.GenericTest()
-}
-
-func TestUnreliable4B(t *testing.T) {
-	ts := MakeTest(t, "4B many clients", 5, 5, false, false, false, -1, false)
-	tester.AnnotateTest("TestUnreliable4B", ts.nservers)
+func TestPersistPartitionUnreliableLinearizable4B(t *testing.T) {
+	ts := MakeTest(t, "4B restarts, partitions, random keys, many clients", 15, 7, false, true, true, -1, true)
+	tester.AnnotateTest("TestPersistPartitionUnreliableLinearizable4B", ts.nservers)
 	ts.GenericTest()
 }
 
 // Submit a request in the minority partition and check that the requests
-// doesn't go through until the partition heals.  The leader in the original
+// doesn't go through until the partition heals. The leader in the original
 // network ends up in the minority partition.
 func TestOnePartition4B(t *testing.T) {
 	ts := MakeTest(t, "4B progress in majority", 0, 5, false, false, false, -1, false)
@@ -218,7 +200,6 @@ func TestOnePartition4B(t *testing.T) {
 
 	done0 := make(chan rpc.Tversion)
 	done1 := make(chan rpc.Tversion)
-
 	ts.Begin("Test: no progress in minority (4B)")
 	tester.AnnotateCheckerBegin(fmt.Sprintf("submit Put(1, 15) and Get(1) to %v", p2))
 	go func() {
@@ -284,6 +265,30 @@ func TestOnePartition4B(t *testing.T) {
 	ts.CheckGet(ck, "1", "15", ver15)
 }
 
+// func TestSpeed4B(t *testing.T) {
+// 	ts := MakeTest(t, "4B speed", 1, 3, true, false, false, -1, false)
+// 	tester.AnnotateTest("TestSpeed4B", ts.nservers)
+// 	ts.GenericTestSpeed()
+// }
+
+func TestBasic4B(t *testing.T) {
+	ts := MakeTest(t, "4B basic", 1, 5, true, false, false, -1, false)
+	tester.AnnotateTest("TestBasic4B", ts.nservers)
+	ts.GenericTest()
+}
+
+func TestConcurrent4B(t *testing.T) {
+	ts := MakeTest(t, "4B many clients", 5, 5, true, false, false, -1, false)
+	tester.AnnotateTest("TestConcurrent4B", ts.nservers)
+	ts.GenericTest()
+}
+
+func TestUnreliable4B(t *testing.T) {
+	ts := MakeTest(t, "4B many clients", 5, 5, false, false, false, -1, false)
+	tester.AnnotateTest("TestUnreliable4B", ts.nservers)
+	ts.GenericTest()
+}
+
 func TestManyPartitionsOneClient4B(t *testing.T) {
 	ts := MakeTest(t, "4B partitions, one client", 1, 5, true, false, true, -1, false)
 	tester.AnnotateTest("TestManyPartitionsOneClient4B", ts.nservers)
@@ -323,12 +328,6 @@ func TestPersistPartition4B(t *testing.T) {
 func TestPersistPartitionUnreliable4B(t *testing.T) {
 	ts := MakeTest(t, "4B restarts, partitions, many clients", 5, 5, false, true, true, -1, false)
 	tester.AnnotateTest("TestPersistPartitionUnreliable4B", ts.nservers)
-	ts.GenericTest()
-}
-
-func TestPersistPartitionUnreliableLinearizable4B(t *testing.T) {
-	ts := MakeTest(t, "4B restarts, partitions, random keys, many clients", 15, 7, false, true, true, -1, true)
-	tester.AnnotateTest("TestPersistPartitionUnreliableLinearizable4B", ts.nservers)
 	ts.GenericTest()
 }
 

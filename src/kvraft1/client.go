@@ -1,21 +1,23 @@
 package kvraft
 
 import (
-	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
-	"6.5840/tester1"
-)
+	"sync"
 
+	"6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
+	tester "6.5840/tester1"
+)
 
 type Clerk struct {
 	clnt    *tester.Clnt
 	servers []string
-	leader int // last successful leader (index into servers[])
+	leader  int // last successful leader (index into servers[])
 	// You can add to this struct.
+	mu sync.Mutex
 }
 
 func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
-	ck := &Clerk{clnt: clnt, servers: servers}
+	ck := &Clerk{clnt: clnt, servers: servers, mu: sync.Mutex{}, leader: 0}
 	// You'll have to add code here.
 	return ck
 }
@@ -35,9 +37,27 @@ func (ck *Clerk) Leader() int {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
+	for {
+		args := rpc.GetArgs{Key: key}
+		reply := rpc.GetReply{}
+		if !ck.clnt.Call(ck.servers[ck.leader], "KVServer.Get", &args, &reply) {
+			continue
+		}
+		if reply.Err == rpc.ErrWrongLeader {
+			ck.mu.Lock()
+			ck.leader = (ck.leader + 1) % len(ck.servers)
+			ck.mu.Unlock()
+			continue
+		}
 
-	// You will have to modify this function.
-	return "", 0, ""
+		if reply.Err == rpc.ErrNoKey {
+			return "", 0, rpc.ErrNoKey
+		}
+		if reply.Err == rpc.OK {
+			// fmt.Printf("returning %v, %v, %v", reply.Value, reply.Version, reply.Err)
+			return reply.Value, reply.Version, reply.Err
+		}
+	}
 }
 
 // Put updates key with value only if the version in the
@@ -58,6 +78,25 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return ""
+	requestCount := 0
+	for {
+		args := rpc.PutArgs{Key: key, Value: value, Version: version}
+		reply := rpc.PutReply{}
+		requestCount += 1
+		if !ck.clnt.Call(ck.servers[ck.leader], "KVServer.Put", &args, &reply) || reply.Err == rpc.ErrWrongLeader {
+			ck.mu.Lock()
+			ck.leader = (ck.leader + 1) % len(ck.servers)
+			ck.mu.Unlock()
+			continue
+		}
+		if reply.Err == rpc.OK {
+			return reply.Err
+		} else if reply.Err == rpc.ErrNoKey {
+			return rpc.ErrNoKey
+		} else if reply.Err == rpc.ErrVersion && requestCount > 1 {
+			return rpc.ErrMaybe
+		} else if reply.Err == rpc.ErrVersion && requestCount == 1 {
+			return rpc.ErrVersion
+		}
+	}
 }

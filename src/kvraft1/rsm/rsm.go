@@ -1,30 +1,32 @@
 package rsm
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"sync"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	raft "6.5840/raft1"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
 )
 
+func NoPrintf(format string, a ...interface{}) {
+}
+
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 	Me  int
-	Id  uint64
+	Id  int32
 	Req any
-}
-
-type WatchCommitResponse struct {
-	result any
-	err    rpc.Err
 }
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
@@ -49,38 +51,43 @@ type RSM struct {
 	// Your definitions here.
 
 	reqId    uint64
-	channels map[uint64]chan WatchCommitResponse
+	channels map[int32]chan any
 }
 
 func annotate(id int, desc, details string) {
-	server := fmt.Sprintf("Server %v", id)
-	tester.Annotate(server, desc, details)
+	// server := fmt.Sprintf("Server %v", id)
+	// tester.Annotate(server, desc, details)
 	// tester.Annotate(server, fmt.Sprintf("%v: %v", time.Since(startTime).Round(time.Second), desc), details)
 }
 
 func (rsm *RSM) watchCommits(applyCh chan raftapi.ApplyMsg) {
-	var nextToSend *uint64 = nil
 	for msg := <-applyCh; true; msg = <-applyCh {
+		s := time.Now()
+		myid := rand.Int()
 		rsm.mu.Lock()
 		if msg.SnapshotValid && msg.CommandValid {
 			log.Panicf("msg.SnapshotValid && msg.CommandValid")
 		}
-		var op Op
-		var ok bool
-		if op, ok = msg.Command.(Op); !ok {
-			log.Panicf("msg.Command.(Op) failed")
-		}
+		var op Op = msg.Command.(Op)
+		// d := labgob.NewDecoder(bytes.NewBuffer(msg.Command.([]byte)))
+
+		// if err := d.Decode(&op); err != nil {
+		// 	log.Panicf("msg.Command.(Op) failed: %v", err)
+		// }
+
+		rsm.mu.Unlock()
 		res := rsm.sm.DoOp(op.Req)
+		rsm.mu.Lock()
+		NoPrintf("%v: time from receive commit to doop + lock: %v\n", myid, time.Since(s))
+
 		if op.Me != rsm.me {
-			rsm.mu.Unlock()
-			continue
+		} else if ch, ok := rsm.channels[op.Id]; ok {
+			ch <- res
+			NoPrintf("%v: time from receive commit to send to ch: %v\n", myid, time.Since(s))
 		}
-		rsm.channels[op.Id] <- WatchCommitResponse{res, rpc.OK}
-		for i := nextToSend; i != nil && *i < op.Id; *i++ {
-			rsm.channels[op.Id] <- WatchCommitResponse{nil, rpc.ErrWrongLeader}
-		}
-		nextToSend = new(uint64)
-		*nextToSend = op.Id + 1
+		// for i := nextToSend; i != nil && *i < op.Id; *i++ {
+		// 	rsm.channels[op.Id] <- WatchCommitResponse{nil, rpc.ErrWrongLeader}
+		// }
 		rsm.mu.Unlock()
 	}
 }
@@ -107,7 +114,7 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
 		reqId:        0,
-		channels:     map[uint64]chan WatchCommitResponse{},
+		channels:     map[int32]chan any{},
 	}
 	if !tester.UseRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
@@ -127,30 +134,62 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	// Submit creates an Op structure to run a command through Raft;
 	// for example: op := Op{Me: rsm.me, Id: id, Req: req}, where req
 	// is the argument to Submit and id is a unique id for the op.
-
 	// your code here
+	s := time.Now()
+	defer func() { NoPrintf("Submit total time: %v\n", time.Since(s)) }()
 	rsm.mu.Lock()
-	op := Op{Me: rsm.me, Id: rsm.reqId, Req: req}
+	id := rand.Int32N(100000)
+
+	// Encode to bytes
+	var buf bytes.Buffer
+	e := labgob.NewEncoder(&buf)
+	op := Op{Me: rsm.me, Id: id, Req: req}
+	if err := e.Encode(op); err != nil {
+		log.Panic(err)
+	}
+
+	NoPrintf("Submit req: %v, type: %T", req, req)
+
 	rsm.reqId += 1
-	channel := make(chan WatchCommitResponse)
-	rsm.channels[op.Id] = channel
-	defer func() { rsm.mu.Lock(); delete(rsm.channels, op.Id); rsm.mu.Unlock() }()
-	_, commitTerm, isLeader := rsm.rf.Start(op)
+	channel := make(chan any)
+	rsm.channels[id] = channel
+	defer func() { rsm.mu.Lock(); delete(rsm.channels, id); rsm.mu.Unlock() }()
 	rsm.mu.Unlock()
+	_, commitTerm, isLeader := rsm.rf.Start(op)
+	// NoPrintf("Started in time: %v\n", time.Since(s))
 
 	if !isLeader {
+		rsm.mu.Lock()
+		annotate(rsm.me, fmt.Sprintf("Failed to start: %v", rsm.reqId), "Not leader")
+		rsm.mu.Unlock()
 		return rpc.ErrWrongLeader, nil // i'm dead, try another server.
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func(ctx context.Context) {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			currentTerm, _ := rsm.rf.GetState()
+			if currentTerm != commitTerm {
+				cancel()
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}(ctx)
+
 	for {
-		currentTerm, _ := rsm.rf.GetState()
 		select {
-		case doOpResponse := <-channel:
-			return doOpResponse.err, doOpResponse.result
-		default:
-		}
-		if currentTerm != commitTerm {
+		case res := <-channel:
+			cancel()
+			return rpc.OK, res
+		case <-ctx.Done():
 			return rpc.ErrWrongLeader, nil
+		default:
+			time.Sleep(1 * time.Microsecond)
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
